@@ -5,3 +5,15 @@ debug*
 node_modules
 docs/.vitepress/cache
 docs/.vitepress/dist
+
+# pkqcode:start
+CLAUDE.md
+.claude/
+.codex/
+.pi/
+.spec/
+AGENTS.md
+.pkqcode/
+.agents/
+.worktreeinclude
+# pkqcode:end
