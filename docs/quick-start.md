@@ -22,7 +22,7 @@ Linux/amd64 与 Linux/arm64 两个平台可直接使用 Docker 或 Docker Compos
 services:
   bili-sync-rs:
     # 不推荐使用 latest 这种模糊的 tag，最好直接指明版本号
-    image: amtoaer/bili-sync-rs:latest
+    image: ghcr.io/qiuos/bili-sync-rs:latest
     restart: unless-stopped
     network_mode: bridge
     # 该选项请仅在日志终端支持彩色输出时启用，否则日志中可能会出现乱码
