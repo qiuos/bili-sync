@@ -6,12 +6,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use bili_sync_entity::video;
 use parking_lot::RwLock;
 use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait};
 use serde_json::Value;
 use tower::ServiceExt;
-
-use bili_sync_entity::video;
 
 use crate::api::{LogHelper, routes};
 use crate::bilibili::BiliClient;
