@@ -1,4 +1,7 @@
-use axum::extract::{Extension, Path};
+use std::path::PathBuf;
+
+use anyhow::Context;
+use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use bili_sync_entity::*;
@@ -8,10 +11,10 @@ use sea_orm::{
 };
 
 use crate::api::error::InnerApiError;
-use crate::api::request::{OrganizationActionRequest, OrganizationRuleRequest};
+use crate::api::request::{BrowseDirectoryRequest, OrganizationActionRequest, OrganizationRuleRequest};
 use crate::api::response::{
-    OrganizationExecuteResponse, OrganizationPlanItem, OrganizationPlanResponse, OrganizationRuleResponse,
-    OrganizationRulesResponse,
+    DirectoryBrowseResponse, DirectoryEntry, OrganizationExecuteResponse, OrganizationPlanItem,
+    OrganizationPlanResponse, OrganizationRuleResponse, OrganizationRulesResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse, ValidatedJson};
 use crate::organization::{self, ItemAction, PlanItem};
@@ -22,6 +25,7 @@ pub(super) fn router() -> Router {
         .route("/organization/rules/{id}", put(update_rule).delete(delete_rule))
         .route("/organization/rules/{id}/preview", post(preview_rule))
         .route("/organization/rules/{id}/execute", post(execute_rule))
+        .route("/organization/directory", get(browse_directory))
 }
 
 /// 列出全部整理规则
@@ -141,6 +145,52 @@ pub async fn execute_rule(
     }))
 }
 
+/// 浏览服务端目录，返回子目录列表，供媒体整理规则选择源/输出目录使用。
+/// 经 /api 统一认证保护；仅暴露目录名与绝对路径，不返回文件或目录内容。
+/// 路径非法、不存在、无法读取等均以 400 返回，便于用户修正输入
+pub async fn browse_directory(
+    Query(request): Query<BrowseDirectoryRequest>,
+) -> Result<ApiResponse<DirectoryBrowseResponse>, ApiError> {
+    // ponytail: 空路径仅解析为 "/"，暂不支持 Windows 盘符枚举；部署环境为 Linux 容器
+    let start = match request.path.as_deref() {
+        None | Some("") => PathBuf::from("/"),
+        Some(path) => PathBuf::from(path),
+    };
+    let response = list_directories(&start).map_err(|e| InnerApiError::BadRequest(format!("{:#}", e)))?;
+    Ok(ApiResponse::ok(response))
+}
+
+/// 列出指定目录下的全部子目录（含指向目录的符号链接，按名称排序）；根目录没有父目录
+fn list_directories(path: &std::path::Path) -> anyhow::Result<DirectoryBrowseResponse> {
+    anyhow::ensure!(path.is_absolute(), "路径必须是绝对路径：{}", path.display());
+    // 解析符号链接与相对组件，避免在浏览入口暴露未规范化的路径
+    let canonical = dunce::canonicalize(path).with_context(|| format!("路径不存在或无法访问：{}", path.display()))?;
+    anyhow::ensure!(canonical.is_dir(), "路径不是目录：{}", canonical.display());
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&canonical).with_context(|| format!("目录读取失败：{}", canonical.display()))?
+    {
+        let entry = entry.with_context(|| format!("目录读取失败：{}", canonical.display()))?;
+        // metadata 跟随符号链接：指向目录的链接可进入浏览，断链或指向文件的条目直接跳过
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        entries.push(DirectoryEntry {
+            path: canonical.join(entry.file_name()).to_string_lossy().to_string(),
+            name,
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(DirectoryBrowseResponse {
+        path: canonical.to_string_lossy().to_string(),
+        parent: canonical.parent().map(|p| p.to_string_lossy().to_string()),
+        entries,
+    })
+}
+
 fn rule_response(rule: organization_rule::Model) -> OrganizationRuleResponse {
     OrganizationRuleResponse {
         id: rule.id,
@@ -172,5 +222,67 @@ fn plan_item_response(item: &PlanItem) -> OrganizationPlanItem {
         action: action.to_string(),
         target: item.target.as_ref().map(|target| target.to_string_lossy().to_string()),
         message: item.message.clone().or(action_message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    /// 测试临时根：优先取环境变量 BILI_SYNC_ORG_TEST_ROOT（指向已登记的任务临时根），缺省为系统临时目录；
+    /// 在其下用 UUID 创建唯一、不可预测的子目录。测试绝不删除任何目录，
+    /// 统一由登记的清理流程或系统临时目录策略回收。
+    fn temp_root(name: &str) -> PathBuf {
+        let base = std::env::var("BILI_SYNC_ORG_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let dir = base.join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    /// 目录浏览仅返回子目录且按名称排序，文件与断链不出现，父目录指向正确
+    #[test]
+    fn list_directories_returns_sorted_subdirs_only() {
+        let root = temp_root("org-browse");
+        std::fs::create_dir(root.join("b-dir")).unwrap();
+        std::fs::create_dir(root.join("a-dir")).unwrap();
+        std::fs::write(root.join("file.txt"), b"").unwrap();
+        // 断链不应出现在列表中
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("not-exist"), root.join("broken-link")).unwrap();
+
+        let canonical = dunce::canonicalize(&root).unwrap();
+        let response = list_directories(&root).unwrap();
+        assert_eq!(response.path, canonical.to_string_lossy().to_string());
+        assert_eq!(
+            response.parent.as_deref(),
+            canonical.parent().map(|p| p.to_string_lossy().to_string()).as_deref()
+        );
+        assert_eq!(
+            response.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["a-dir", "b-dir"]
+        );
+        assert_eq!(
+            response.entries[0].path,
+            canonical.join("a-dir").to_string_lossy().to_string()
+        );
+    }
+
+    /// 相对路径与不存在的路径均返回错误
+    #[test]
+    fn list_directories_rejects_invalid_paths() {
+        assert!(list_directories(Path::new("relative/path")).is_err());
+        assert!(list_directories(&temp_root("org-browse-missing").join("not-exist")).is_err());
+    }
+
+    /// 根目录没有父目录
+    #[cfg(unix)]
+    #[test]
+    fn list_directories_root_has_no_parent() {
+        let response = list_directories(Path::new("/")).unwrap();
+        assert!(response.parent.is_none());
     }
 }

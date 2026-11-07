@@ -89,6 +89,38 @@ export interface UpdateFilteredVideoStatusResponse {
 	updated_pages_count: number;
 }
 
+// 批量清理相关类型：清理只删除数据库记录，不删除本地文件
+// 预览返回候选 ID 列表，执行时原样提交，实际删除与跳过数量以执行结果为准
+export interface VideosCleanupPreviewResponse {
+	invalid_ids: number[];
+	missing_ids: number[];
+	// 因缺少任何可确认存在的视频文件而被跳过本地缺失检查的视频源目录（防磁盘未挂载误判）
+	skipped_source_paths: string[];
+}
+
+export interface VideosCleanupRequest {
+	invalid_ids: number[];
+	missing_ids: number[];
+}
+
+export interface VideosCleanupResponse {
+	deleted_videos_count: number;
+	deleted_pages_count: number;
+	skipped_count: number;
+}
+
+// 服务端目录浏览相关类型：仅目录名与绝对路径，不含文件
+export interface DirectoryEntry {
+	path: string;
+	name: string;
+}
+
+export interface DirectoryBrowseResponse {
+	path: string;
+	parent: string | null;
+	entries: DirectoryEntry[];
+}
+
 export interface ApiError {
 	message: string;
 	status: number;

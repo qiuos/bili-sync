@@ -196,3 +196,19 @@ pub struct OrganizationActionRequest {
     /// 电影规则必填：待整理的视频 id 列表
     pub video_ids: Option<Vec<i32>>,
 }
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct VideosCleanupRequest {
+    /// 预览确认的 B 站失效候选视频 id
+    #[serde(default)]
+    pub invalid_ids: Vec<i32>,
+    /// 预览确认的文件缺失候选视频 id
+    #[serde(default)]
+    pub missing_ids: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BrowseDirectoryRequest {
+    /// 待浏览的绝对路径；缺省时从根目录开始
+    pub path: Option<String>,
+}

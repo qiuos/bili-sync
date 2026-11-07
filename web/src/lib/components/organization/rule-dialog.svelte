@@ -13,6 +13,8 @@
 		SheetTitle
 	} from '$lib/components/ui/sheet/index.js';
 	import api from '$lib/api';
+	import FolderOpenIcon from '@lucide/svelte/icons/folder-open';
+	import DirectoryPicker from '$lib/components/organization/directory-picker.svelte';
 	import type {
 		ApiError,
 		OrganizationRule,
@@ -38,6 +40,9 @@
 	let sourcePath = $state('');
 	let outputPath = $state('');
 	let loading = $state(false);
+
+	// 目录浏览选择：'source' | 'output' 标记当前为哪个输入框选目录，null 表示关闭
+	let pickerTarget = $state<'source' | 'output' | null>(null);
 
 	$effect(() => {
 		if (open) {
@@ -131,14 +136,27 @@
 					<Label for="rule-source" class="text-sm font-medium">
 						源目录 <span class="text-destructive">*</span>
 					</Label>
-					<Input
-						id="rule-source"
-						type="text"
-						placeholder="例如：/media/downloads/bilibili"
-						bind:value={sourcePath}
-						disabled={loading}
-						class="font-mono text-sm"
-					/>
+					<div class="flex items-start gap-2">
+						<Input
+							id="rule-source"
+							type="text"
+							placeholder="例如：/media/downloads/bilibili"
+							bind:value={sourcePath}
+							disabled={loading}
+							class="flex-1 font-mono text-sm"
+						/>
+						<Button
+							type="button"
+							variant="outline"
+							class="shrink-0 cursor-pointer px-3"
+							disabled={loading}
+							aria-label="浏览选择源目录"
+							onclick={() => (pickerTarget = 'source')}
+						>
+							<FolderOpenIcon class="h-4 w-4" aria-hidden="true" />
+							浏览
+						</Button>
+					</div>
 					<p class="text-muted-foreground text-xs">待整理视频所在的下载目录，须为绝对路径。</p>
 				</div>
 
@@ -146,14 +164,27 @@
 					<Label for="rule-output" class="text-sm font-medium">
 						输出目录 <span class="text-destructive">*</span>
 					</Label>
-					<Input
-						id="rule-output"
-						type="text"
-						placeholder="例如：/media/emby/电视剧"
-						bind:value={outputPath}
-						disabled={loading}
-						class="font-mono text-sm"
-					/>
+					<div class="flex items-start gap-2">
+						<Input
+							id="rule-output"
+							type="text"
+							placeholder="例如：/media/emby/电视剧"
+							bind:value={outputPath}
+							disabled={loading}
+							class="flex-1 font-mono text-sm"
+						/>
+						<Button
+							type="button"
+							variant="outline"
+							class="shrink-0 cursor-pointer px-3"
+							disabled={loading}
+							aria-label="浏览选择输出目录"
+							onclick={() => (pickerTarget = 'output')}
+						>
+							<FolderOpenIcon class="h-4 w-4" aria-hidden="true" />
+							浏览
+						</Button>
+					</div>
 					<p class="text-muted-foreground text-xs">
 						硬链接媒体库目录，须为绝对路径且与源文件位于同一文件系统；不能与任何源目录或其他输出目录相同或互相嵌套。
 					</p>
@@ -180,3 +211,25 @@
 		</SheetFooter>
 	</SheetContent>
 </Sheet>
+
+<!-- 服务端目录浏览选择：确认后回填输入框，仍可手动修改；原有路径校验保持不变 -->
+<DirectoryPicker
+	open={pickerTarget !== null}
+	title={pickerTarget === 'output' ? '选择输出目录' : '选择源目录'}
+	initialPath={pickerTarget === 'output'
+		? (rule?.output_path ?? outputPath)
+		: (rule?.source_path ?? sourcePath)}
+	onConfirm={(path) => {
+		if (pickerTarget === 'output') {
+			outputPath = path;
+		} else if (pickerTarget === 'source') {
+			sourcePath = path;
+		}
+		pickerTarget = null;
+	}}
+	onclose={() => {
+		if (pickerTarget !== null) {
+			pickerTarget = null;
+		}
+	}}
+/>

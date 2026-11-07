@@ -5,6 +5,7 @@ import type {
 	CollectionsResponse,
 	Config,
 	DashBoardResponse,
+	DirectoryBrowseResponse,
 	FavoritesResponse,
 	FullSyncVideoSourceRequest,
 	FullSyncVideoSourceResponse,
@@ -33,6 +34,9 @@ import type {
 	UpdateVideoStatusResponse,
 	UppersResponse,
 	VideoResponse,
+	VideosCleanupPreviewResponse,
+	VideosCleanupRequest,
+	VideosCleanupResponse,
 	VideoSourcesDetailsResponse,
 	VideoSourcesResponse,
 	VideosRequest,
@@ -224,6 +228,28 @@ class ApiClient {
 		});
 	}
 
+	// 浏览服务端目录（仅子目录列表），不传 path 时从根目录开始
+	async browseDirectory(path?: string): Promise<ApiResponse<DirectoryBrowseResponse>> {
+		return this.get<DirectoryBrowseResponse>(
+			'/organization/directory',
+			path ? { path } : undefined
+		);
+	}
+
+	async deleteVideo(id: number): Promise<ApiResponse<boolean>> {
+		return this.request<boolean>(`/videos/${id}`, 'DELETE');
+	}
+
+	async previewVideosCleanup(): Promise<ApiResponse<VideosCleanupPreviewResponse>> {
+		return this.post<VideosCleanupPreviewResponse>('/videos/cleanup/preview');
+	}
+
+	async executeVideosCleanup(
+		request: VideosCleanupRequest
+	): Promise<ApiResponse<VideosCleanupResponse>> {
+		return this.post<VideosCleanupResponse>('/videos/cleanup', request);
+	}
+
 	async resetVideoStatus(
 		id: number,
 		request: ResetVideoStatusRequest
@@ -373,6 +399,10 @@ const api = {
 	getVideoSources: () => apiClient.getVideoSources(),
 	getVideos: (params?: VideosRequest) => apiClient.getVideos(params),
 	getVideo: (id: number) => apiClient.getVideo(id),
+	deleteVideo: (id: number) => apiClient.deleteVideo(id),
+	previewVideosCleanup: () => apiClient.previewVideosCleanup(),
+	executeVideosCleanup: (request: VideosCleanupRequest) => apiClient.executeVideosCleanup(request),
+	browseDirectory: (path?: string) => apiClient.browseDirectory(path),
 	resetVideoStatus: (id: number, request: ResetVideoStatusRequest) =>
 		apiClient.resetVideoStatus(id, request),
 	clearAndResetVideoStatus: (id: number) => apiClient.clearAndResetVideoStatus(id),

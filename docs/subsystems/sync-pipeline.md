@@ -50,6 +50,7 @@
   - Video subtask order: 0 cover/poster, 1 detail NFO, 2 upper face, 3 upper NFO, 4 page download. Page subtask order: 0 poster, 1 video, 2 NFO, 3 danmaku, 4 subtitle (matches `crates/bili_sync/src/utils/status.rs` doc comments and the front-end task labels).
   - `ExecutionStatus::Skipped` and `Succeeded` both set `STATUS_OK`; `Failed` increments unless already at `STATUS_MAX_RETRY`; `Ignored` leaves the bits untouched; `Fixed(value)` overwrites the subtask. `Ignored` is produced for permission-denied I/O and for reqwest decode/body/timeout errors, so those are simply retried next round.
   - Per-source `latest_row_at` is the only scan watermark; `page.danmaku_last_synced_at` is the only danmaku watermark.
+  - Record deletion through the API (`DELETE /api/videos/{id}`) rolls the owning source's `latest_row_at` back to one second before the deleted video's release time (favorite/watch-later compare `favtime`, collection `pubtime`, submission `ctime`), only ever backwards, so an eligible video can be rediscovered and downloaded on a re-scan. It never moves the watermark forward.
 
 ## Constraints and failures
 

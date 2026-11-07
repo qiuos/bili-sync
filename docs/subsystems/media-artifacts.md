@@ -74,7 +74,7 @@
   - A failed `canonicalize` (`canonicalize video path failed` / `canonicalize base path failed`) aborts that video/page; usually a missing or unreachable directory.
   - Mismatched byte counts abort the download before the final copy. An interruption or failure during the copy can leave a partial destination file.
   - ffmpeg missing or failing is fatal at startup for the binary check and a per-page failure at merge time (`ffmpeg error: {stderr}`).
-  - Files deleted by the user are not detected; the statuses still say success. `clear-and-reset-status` deletes the video's page rows and attempts to remove the directory at `video.path`, returning a `warning` if removal fails. The stored `video.path` remains unchanged.
+  - Deleting files does not change download statuses. The cleanup preview and execution APIs can identify records whose successfully downloaded page files are all missing, subject to conservative source availability checks; cleanup deletes database rows only. `clear-and-reset-status` deletes the video's page rows and attempts to remove the directory at `video.path`, returning a `warning` if removal fails. The stored `video.path` remains unchanged.
 - Compatibility / migration behavior:
   - Changing `video_name`/`page_name` templates only affects videos that have no stored path yet; already-downloaded rows keep their original paths. Migrating an existing library requires clearing paths (the API has no bulk path rewrite; `clear-and-reset-status` removes pages, not paths).
   - `nfo_time_type` (`FavTime`/`PubTime`) changes `<premiered>`/`<year>` for future NFO writes only.

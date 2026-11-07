@@ -20,20 +20,23 @@ use crate::api::error::InnerApiError;
 use crate::api::helper::{update_page_download_status, update_video_download_status};
 use crate::api::request::{
     ResetFilteredVideoStatusRequest, ResetVideoStatusRequest, UpdateFilteredVideoStatusRequest,
-    UpdateVideoStatusRequest, VideosRequest,
+    UpdateVideoStatusRequest, VideosCleanupRequest, VideosRequest,
 };
 use crate::api::response::{
     ClearAndResetVideoStatusResponse, PageInfo, ResetFilteredVideosResponse, ResetVideoResponse, SimplePageInfo,
     SimpleVideoInfo, UpdateFilteredVideoStatusResponse, UpdateVideoStatusResponse, VideoInfo, VideoResponse,
-    VideosResponse,
+    VideosCleanupPreviewResponse, VideosCleanupResponse, VideosResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse, ValidatedJson};
+use crate::task::DownloadTaskManager;
 use crate::utils::status::{PageStatus, VideoStatus};
+
+mod cleanup;
 
 pub(super) fn router() -> Router {
     Router::new()
         .route("/videos", get(get_videos))
-        .route("/videos/{id}", get(get_video))
+        .route("/videos/{id}", get(get_video).delete(delete_video))
         .route("/videos/{id}/cover", get(get_video_cover))
         .route(
             "/videos/{id}/clear-and-reset-status",
@@ -43,6 +46,8 @@ pub(super) fn router() -> Router {
         .route("/videos/{id}/update-status", post(update_video_status))
         .route("/videos/reset-status", post(reset_filtered_video_status))
         .route("/videos/update-status", post(update_filtered_video_status))
+        .route("/videos/cleanup/preview", post(preview_cleanup))
+        .route("/videos/cleanup", post(execute_cleanup))
 }
 
 fn apply_created_at_filter(
@@ -491,4 +496,223 @@ async fn find_local_cover(video: &video::Model, db: &DatabaseConnection) -> Opti
     let base = dunce::canonicalize(&video.path).ok()?;
     let canonical = dunce::canonicalize(candidate).ok()?;
     canonical.starts_with(base).then_some(canonical)
+}
+
+/// 删除单条视频记录及其全部分页记录，保留本地文件；回退所属视频源的扫描水位，
+/// 保证重新扫描后能够重新发现该视频并重新下载
+pub async fn delete_video(
+    Path(id): Path<i32>,
+    Extension(db): Extension<DatabaseConnection>,
+) -> Result<ApiResponse<bool>, ApiError> {
+    let Some(video_info) = video::Entity::find_by_id(id).one(&db).await? else {
+        return Err(InnerApiError::NotFound(id).into());
+    };
+    let _running_lock = acquire_record_mutation_lock().await?;
+    let txn = db.begin().await?;
+    page::Entity::delete_many()
+        .filter(page::Column::VideoId.eq(id))
+        .exec(&txn)
+        .await?;
+    video::Entity::delete_by_id(id).exec(&txn).await?;
+    cleanup::rollback_source_latest_row_at(&txn, &video_info).await?;
+    txn.commit().await?;
+    Ok(ApiResponse::ok(true))
+}
+
+/// 预览可批量清理的候选：B 站失效记录，以及已下载完成且全部分 P 文件均不存在的记录。
+/// 返回候选 ID，前端展示并让用户确认后原样回传给执行接口
+pub async fn preview_cleanup(
+    Extension(db): Extension<DatabaseConnection>,
+) -> Result<ApiResponse<VideosCleanupPreviewResponse>, ApiError> {
+    let selection = cleanup::select_cleanup_targets(&db).await?;
+    Ok(ApiResponse::ok(VideosCleanupPreviewResponse {
+        invalid_ids: selection.invalid_ids,
+        missing_ids: selection.missing_ids,
+        skipped_source_paths: selection.skipped_source_paths,
+    }))
+}
+
+/// 执行批量清理：只删除用户确认过且重新核验通过的数据库记录及其分页记录，不删除任何本地文件；
+/// 预览到执行之间状态变化的候选会被跳过而不会误删
+pub async fn execute_cleanup(
+    Extension(db): Extension<DatabaseConnection>,
+    ValidatedJson(request): ValidatedJson<VideosCleanupRequest>,
+) -> Result<ApiResponse<VideosCleanupResponse>, ApiError> {
+    let _running_lock = acquire_record_mutation_lock().await?;
+    let report = cleanup::execute_cleanup_records(&db, &request.invalid_ids, &request.missing_ids).await?;
+    Ok(ApiResponse::ok(VideosCleanupResponse {
+        deleted_videos_count: report.deleted_videos_count,
+        deleted_pages_count: report.deleted_pages_count,
+        skipped_count: report.skipped_count,
+    }))
+}
+
+/// 删除/清理记录前与下载任务互斥：下载进行中时拒绝操作，避免已删除的记录被下载流程回写为不完整数据；
+/// 任务管理器尚未初始化时不可能有下载任务在运行，直接放行
+async fn acquire_record_mutation_lock() -> Result<Option<tokio::sync::MutexGuard<'static, ()>>, ApiError> {
+    match DownloadTaskManager::try_get() {
+        None => Ok(None),
+        Some(manager) => manager.try_running_lock().map(Some).ok_or_else(|| {
+            InnerApiError::BadRequest("视频下载任务正在进行中，请等待本轮任务结束后再删除或清理记录".to_string()).into()
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bili_sync_migration::{Migrator, MigratorTrait};
+
+    use super::*;
+
+    /// 测试临时根：优先取环境变量 BILI_SYNC_ORG_TEST_ROOT（指向已登记的任务临时根），缺省为系统临时目录；
+    /// 在其下用 UUID 创建唯一、不可预测的子目录。测试绝不删除任何目录，
+    /// 统一由登记的清理流程或系统临时目录策略回收。
+    fn temp_root(name: &str) -> PathBuf {
+        let base = std::env::var("BILI_SYNC_ORG_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let dir = base.join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    async fn test_db(dir: &std::path::Path) -> DatabaseConnection {
+        let db = sea_orm::Database::connect(format!("sqlite://{}?mode=rwc", dir.join("data.sqlite").display()))
+            .await
+            .unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        db
+    }
+
+    fn datetime((y, mo, d): (i32, u32, u32), (h, mi, s): (u32, u32, u32)) -> NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(y, mo, d)
+            .unwrap()
+            .and_hms_opt(h, mi, s)
+            .unwrap()
+    }
+
+    async fn insert_favorite(
+        db: &DatabaseConnection,
+        path: &std::path::Path,
+        latest_row_at: NaiveDateTime,
+    ) -> favorite::Model {
+        favorite::ActiveModel {
+            f_id: Set(1),
+            name: Set("测试收藏夹".to_string()),
+            path: Set(path.to_string_lossy().to_string()),
+            enabled: Set(true),
+            latest_row_at: Set(latest_row_at),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap()
+    }
+
+    async fn insert_video(
+        db: &DatabaseConnection,
+        favorite_id: i32,
+        favtime: NaiveDateTime,
+        path: &std::path::Path,
+    ) -> video::Model {
+        video::ActiveModel {
+            bvid: Set("BV1test".to_string()),
+            favorite_id: Set(Some(favorite_id)),
+            upper_id: Set(1),
+            upper_name: Set("UP主".to_string()),
+            upper_face: Set(String::new()),
+            intro: Set(String::new()),
+            cover: Set(String::new()),
+            name: Set("测试视频".to_string()),
+            path: Set(path.to_string_lossy().to_string()),
+            category: Set(2),
+            download_status: Set(0),
+            valid: Set(true),
+            favtime: Set(favtime),
+            pubtime: Set(favtime),
+            ctime: Set(favtime),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap()
+    }
+
+    async fn insert_page(db: &DatabaseConnection, video_id: i32, mp4: &std::path::Path) -> page::Model {
+        page::ActiveModel {
+            video_id: Set(video_id),
+            cid: Set(1),
+            pid: Set(0),
+            name: Set("分P0".to_string()),
+            duration: Set(0),
+            path: Set(Some(mp4.to_string_lossy().to_string())),
+            download_status: Set(0),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap()
+    }
+
+    /// 删除记录后视频与分页被移除、本地文件保留、来源扫描水位回退到发布时间之前
+    #[tokio::test]
+    async fn delete_video_keeps_files_and_rolls_back_watermark() {
+        let dir = temp_root("video-delete");
+        let db = test_db(&dir).await;
+        let source = insert_favorite(&db, &dir.join("source"), datetime((2026, 6, 2), (0, 0, 0))).await;
+        let video_dir = dir.join("source").join("v");
+        std::fs::create_dir_all(&video_dir).unwrap();
+        let mp4 = video_dir.join("0.mp4");
+        std::fs::write(&mp4, b"").unwrap();
+        let video = insert_video(&db, source.id, datetime((2026, 6, 1), (12, 0, 0)), &video_dir).await;
+        let page = insert_page(&db, video.id, &mp4).await;
+
+        let Ok(response) = delete_video(Path(video.id), Extension(db.clone())).await else {
+            panic!("删除应成功");
+        };
+        assert_eq!(response.into_response().status(), axum::http::StatusCode::OK);
+
+        assert!(video::Entity::find_by_id(video.id).one(&db).await.unwrap().is_none());
+        assert!(page::Entity::find_by_id(page.id).one(&db).await.unwrap().is_none());
+        assert!(mp4.exists());
+        let source = favorite::Entity::find_by_id(source.id).one(&db).await.unwrap().unwrap();
+        assert_eq!(source.latest_row_at, datetime((2026, 6, 1), (11, 59, 59)));
+    }
+
+    /// 扫描水位已经早于回退目标时保持不变，只回退不前移
+    #[tokio::test]
+    async fn delete_video_keeps_older_watermark() {
+        let dir = temp_root("video-delete-older");
+        let db = test_db(&dir).await;
+        let source = insert_favorite(&db, &dir.join("source"), datetime((2020, 1, 1), (0, 0, 0))).await;
+        let video_dir = dir.join("source").join("v");
+        std::fs::create_dir_all(&video_dir).unwrap();
+        let video = insert_video(&db, source.id, datetime((2026, 6, 1), (12, 0, 0)), &video_dir).await;
+        insert_page(&db, video.id, &video_dir.join("0.mp4")).await;
+
+        let Ok(response) = delete_video(Path(video.id), Extension(db.clone())).await else {
+            panic!("删除应成功");
+        };
+        assert_eq!(response.into_response().status(), axum::http::StatusCode::OK);
+
+        let source = favorite::Entity::find_by_id(source.id).one(&db).await.unwrap().unwrap();
+        assert_eq!(source.latest_row_at, datetime((2020, 1, 1), (0, 0, 0)));
+    }
+
+    /// 删除不存在的记录返回 NotFound
+    #[tokio::test]
+    async fn delete_missing_video_returns_not_found() {
+        let dir = temp_root("video-delete-404");
+        let db = test_db(&dir).await;
+        let Err(err) = delete_video(Path(999), Extension(db.clone())).await else {
+            panic!("应返回 NotFound");
+        };
+        assert_eq!(err.into_response().status(), axum::http::StatusCode::NOT_FOUND);
+    }
 }

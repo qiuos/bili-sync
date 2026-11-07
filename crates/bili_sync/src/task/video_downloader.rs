@@ -62,6 +62,17 @@ impl DownloadTaskManager {
         INSTANCE.get().expect("DownloadTaskManager is not initialized")
     }
 
+    /// 获取 DownloadTaskManager 单例，未初始化时返回 None
+    pub fn try_get() -> Option<&'static DownloadTaskManager> {
+        INSTANCE.get()
+    }
+
+    /// 尝试获取下载运行锁（凭据刷新任务也会持有该锁）：任务运行中返回 None。
+    /// 供删除/清理记录等操作与下载流程互斥使用
+    pub fn try_running_lock(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.cx.running.try_lock().ok()
+    }
+
     /// 订阅下载任务的状态更新
     pub fn subscribe(&self) -> watch::Receiver<TaskStatus> {
         self.cx.status_rx.clone()

@@ -7,14 +7,19 @@
 	import { Checkbox } from '$lib/components/ui/checkbox/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
 	import type { VideoInfo } from '$lib/types';
+	import BanIcon from '@lucide/svelte/icons/ban';
 	import BrushCleaningIcon from '@lucide/svelte/icons/brush-cleaning';
+	import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+	import CircleXIcon from '@lucide/svelte/icons/circle-x';
 	import ClockIcon from '@lucide/svelte/icons/clock';
 	import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
 	import FolderIcon from '@lucide/svelte/icons/folder';
 	import HeartIcon from '@lucide/svelte/icons/heart';
 	import InfoIcon from '@lucide/svelte/icons/info';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+	import SkipForwardIcon from '@lucide/svelte/icons/skip-forward';
 	import SquareArrowOutUpRightIcon from '@lucide/svelte/icons/square-arrow-out-up-right';
+	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import { goto } from '$app/navigation';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
@@ -31,10 +36,13 @@
 	export let showProgress: boolean = true; // 是否显示进度信息
 	export let onReset: ((forceReset: boolean) => Promise<void>) | null = null; // 自定义重置函数
 	export let onClearAndReset: (() => Promise<void>) | null = null; // 自定义清空重置函数
+	export let onDelete: (() => Promise<void>) | null = null; // 删除记录（仅删数据库记录，保留本地文件）
 	export let resetDialogOpen = false; // 导出对话框状态，让父组件可以控制
 	export let clearAndResetDialogOpen = false; // 导出清空重置对话框状态
+	export let deleteDialogOpen = false; // 导出删除确认对话框状态
 	export let resetting = false;
 	export let clearAndResetting = false;
+	export let deleting = false;
 
 	let forceReset = false;
 
@@ -65,14 +73,26 @@
 	): {
 		text: string;
 		style: string;
+		icon: typeof BanIcon;
+		chipClass: string;
 	} {
 		if (!valid) {
 			// 视频属性表明已失效，或由于各种条件判断（充电视频等）判定为无效的情况
-			return { text: '失效', style: 'bg-gray-100 text-gray-700' };
+			return {
+				text: '失效',
+				style: 'bg-gray-100 text-gray-700',
+				icon: BanIcon,
+				chipClass: 'bg-gray-700 text-gray-50'
+			};
 		}
 		if (!shouldDownload) {
 			// 被过滤规则排除，显示为“跳过”
-			return { text: '跳过', style: 'bg-gray-100 text-gray-700' };
+			return {
+				text: '跳过',
+				style: 'bg-gray-100 text-gray-700',
+				icon: SkipForwardIcon,
+				chipClass: 'bg-gray-700 text-gray-50'
+			};
 		}
 		const completed = downloadStatus.filter((status) => status === 7).length;
 		const total = downloadStatus.length;
@@ -80,13 +100,28 @@
 
 		if (completed === total) {
 			// 全部完成，显示为“完成”
-			return { text: '完成', style: 'bg-emerald-700 text-emerald-100' };
+			return {
+				text: '完成',
+				style: 'bg-emerald-700 text-emerald-100',
+				icon: CircleCheckIcon,
+				chipClass: 'bg-emerald-700 text-white'
+			};
 		} else if (failed > 0) {
 			// 出现了失败，显示为“失败”
-			return { text: '失败', style: 'bg-rose-700 text-rose-100' };
+			return {
+				text: '失败',
+				style: 'bg-rose-700 text-rose-100',
+				icon: CircleXIcon,
+				chipClass: 'bg-rose-700 text-white'
+			};
 		} else {
 			// 还未开始，显示为“等待”
-			return { text: '等待', style: 'bg-yellow-700 text-yellow-100' };
+			return {
+				text: '等待',
+				style: 'bg-yellow-700 text-yellow-100',
+				icon: ClockIcon,
+				chipClass: 'bg-yellow-800 text-white'
+			};
 		}
 	}
 
@@ -137,49 +172,86 @@
 <Card class={cardClasses}>
 	{#if mode !== 'page'}
 		<!-- page 模式下 video.id 实为分页 id，与按视频查询的封面接口不符，故不展示封面 -->
-		<VideoCover videoId={video.id} alt={displayTitle} class="-mt-6 rounded-t-xl" />
+		<div class="relative -mt-6">
+			{#if mode === 'default'}
+				<a
+					href={`/video/${video.id}`}
+					aria-label={`打开「${displayTitle}」详情`}
+					class="focus-visible:ring-ring block rounded-t-xl focus-visible:outline-none focus-visible:ring-2"
+				>
+					<VideoCover videoId={video.id} alt={displayTitle} class="rounded-t-xl" />
+				</a>
+			{:else}
+				<VideoCover videoId={video.id} alt={displayTitle} class="rounded-t-xl" />
+			{/if}
+			<Tooltip.Root>
+				<Tooltip.Trigger
+					aria-label={`状态：${overallStatus.text}`}
+					class="focus-visible:ring-ring absolute top-2 right-2 z-10 flex h-7 w-7 cursor-help items-center justify-center rounded-full shadow-md focus-visible:outline-none focus-visible:ring-2 {overallStatus.chipClass}"
+				>
+					<overallStatus.icon class="h-4 w-4" aria-hidden="true" />
+				</Tooltip.Trigger>
+				<Tooltip.Content class="text-xs">
+					<p>{overallStatus.text}</p>
+				</Tooltip.Content>
+			</Tooltip.Root>
+		</div>
 	{/if}
 	<CardHeader class="shrink-0 pb-1">
 		<div class="flex min-w-0 items-start justify-between gap-3">
 			<CardTitle
-				class="line-clamp-2 min-w-0 flex-1 cursor-default {mode === 'default'
-					? 'text-sm'
-					: 'text-sm'} leading-relaxed font-medium"
+				class="line-clamp-2 min-w-0 flex-1 leading-relaxed font-medium"
 				title={displayTitle}
 			>
-				{displayTitle}
+				{#if mode === 'default'}
+					<!-- 封面和标题均可进入详情 -->
+					<a
+						href={`/video/${video.id}`}
+						class="focus-visible:ring-ring rounded-sm underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2"
+					>
+						{displayTitle}
+					</a>
+				{:else}
+					{displayTitle}
+				{/if}
 			</CardTitle>
-			<Badge
-				variant="secondary"
-				class="shrink-0 px-2 py-1 text-xs font-medium {overallStatus.style} "
-			>
-				{overallStatus.text}
-			</Badge>
-		</div>
-		{#if displaySubtitle}
-			<div class="text-muted-foreground mt-1.5 flex min-w-0 items-center gap-1 text-sm">
-				<UserIcon class="h-3.5 w-3.5 shrink-0" />
-				<span class="min-w-0 cursor-default truncate" title={displaySubtitle}>
-					{displaySubtitle}
-				</span>
-			</div>
-		{/if}
-		{#if source}
-			<div class="text-muted-foreground mt-2 flex min-w-0 items-center justify-end gap-1 text-sm">
-				<Badge variant="outline" class="max-w-full shrink px-1.5 py-0.5">
-					{#if source.type === 'favorite'}
-						<HeartIcon class="h-3.5 w-3.5 shrink-0" />
-					{:else if source.type === 'collection'}
-						<FolderIcon class="h-3.5 w-3.5 shrink-0" />
-					{:else if source.type === 'submission'}
-						<UserIcon class="h-3.5 w-3.5 shrink-0" />
-					{:else if source.type === 'watch_later'}
-						<ClockIcon class="h-3.5 w-3.5 shrink-0" />
-					{/if}
-					<span class="min-w-0 truncate" title={source.name}>
-						{source.name}
-					</span>
+			{#if mode === 'page'}
+				<!-- page 模式无封面，状态文字徽标保留在标题旁 -->
+				<Badge
+					variant="secondary"
+					class="shrink-0 px-2 py-1 text-xs font-medium {overallStatus.style} "
+				>
+					{overallStatus.text}
 				</Badge>
+			{/if}
+		</div>
+		{#if displaySubtitle || source}
+			<!-- UP 主名称与 B 站来源同一行 -->
+			<div class="text-muted-foreground mt-1.5 flex min-w-0 items-center gap-2 text-sm">
+				{#if displaySubtitle}
+					<div class="flex min-w-0 items-center gap-1">
+						<UserIcon class="h-3.5 w-3.5 shrink-0" />
+						<span class="min-w-0 cursor-default truncate" title={displaySubtitle}>
+							{displaySubtitle}
+						</span>
+					</div>
+				{/if}
+				{#if source}
+					<Badge variant="outline" class="ml-auto max-w-[60%] shrink px-1.5 py-0.5">
+						{#if source.type === 'favorite'}
+							<HeartIcon class="h-3.5 w-3.5 shrink-0" />
+						{:else if source.type === 'collection'}
+							<FolderIcon class="h-3.5 w-3.5 shrink-0" />
+						{:else if source.type === 'submission'}
+							<UserIcon class="h-3.5 w-3.5 shrink-0" />
+						{:else if source.type === 'watch_later'}
+							<ClockIcon class="h-3.5 w-3.5 shrink-0" />
+						{/if}
+						<span class="min-w-0 truncate" title={source.name}>
+							{source.name}
+						</span>
+					</Badge>
+				{/if}
 			</div>
 		{/if}
 	</CardHeader>
@@ -260,6 +332,16 @@
 								<SquareArrowOutUpRightIcon class="mr-2 h-4 w-4" />
 								在 B 站打开
 							</DropdownMenu.Item>
+							{#if onDelete}
+								<DropdownMenu.Separator />
+								<DropdownMenu.Item
+									class="text-destructive focus:text-destructive cursor-pointer"
+									onclick={() => (deleteDialogOpen = true)}
+								>
+									<Trash2Icon class="mr-2 h-4 w-4" />
+									删除记录
+								</DropdownMenu.Item>
+							{/if}
 						</DropdownMenu.Content>
 					</DropdownMenu.Root>
 				</div>
@@ -348,3 +430,30 @@
 		</AlertDialog.Footer>
 	</AlertDialog.Content>
 </AlertDialog.Root>
+
+<!-- 删除记录确认对话框：仅删除数据库记录，本地文件保留 -->
+{#if onDelete}
+	<AlertDialog.Root bind:open={deleteDialogOpen}>
+		<AlertDialog.Content>
+			<AlertDialog.Header>
+				<AlertDialog.Title>删除视频记录</AlertDialog.Title>
+				<AlertDialog.Description>
+					确定要删除 <strong>"{displayTitle}"</strong> 的视频记录吗？
+					仅删除数据库中的视频及分P记录，<span
+						class="font-medium text-emerald-700 dark:text-emerald-400">本地视频文件全部保留</span
+					>；删除后重新添加视频源或重新扫描，即可再次发现并下载该视频。
+				</AlertDialog.Description>
+			</AlertDialog.Header>
+			<AlertDialog.Footer>
+				<AlertDialog.Cancel disabled={deleting}>取消</AlertDialog.Cancel>
+				<AlertDialog.Action
+					onclick={onDelete}
+					disabled={deleting}
+					class="bg-destructive hover:bg-destructive/90"
+				>
+					{deleting ? '删除中...' : '确认删除'}
+				</AlertDialog.Action>
+			</AlertDialog.Footer>
+		</AlertDialog.Content>
+	</AlertDialog.Root>
+{/if}

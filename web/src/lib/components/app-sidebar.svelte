@@ -50,14 +50,14 @@
 						href: '/videos'
 					},
 					{
-						title: '媒体整理',
-						icon: FolderSyncIcon,
-						href: '/organization'
-					},
-					{
 						title: '视频源',
 						icon: DatabaseIcon,
 						href: '/video-sources'
+					},
+					{
+						title: '媒体整理',
+						icon: FolderSyncIcon,
+						href: '/organization'
 					}
 				]
 			},

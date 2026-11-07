@@ -31,8 +31,8 @@
 - Routes present:
   - `/` dashboard: `getDashboard()` counts plus `subscribeToSysInfo`/`subscribeToTasks`; CPU and memory history arrays; disk usage computed as `(total_disk - available_disk) / total_disk`; triggers `POST /api/task/download` via `triggerDownloadTask`.
   - `/logs`: subscribes to logs and keeps the last 500 entries (`logs.slice(-499)`), auto-scrolls unless the user scrolled up.
-  - `/videos`: list with URL-synced filters (page size 20), source/query/status/validation/created-time filters.
-  - `/organization`: create and edit TV or movie rules, preview the plan, select movies and execute; results show item status and counts.
+  - `/videos`: list with URL-synced filters (page size 20), source/query/status/validation/created-time filters, record deletion and confirmed cleanup preview. Covers and titles open details; a cover-corner icon displays status.
+  - `/organization`: create and edit TV or movie rules, browse server directories or enter paths, preview the plan, select movies and execute; results show item status and counts.
   - `/video/[id]`: detail, per-subtask status editor, reset (optional `force`), clear-and-reset (deletes pages and local directory).
   - `/video-sources`: tabs for favorites/collections/submissions/watch_later; add/update/remove/evaluate/full-sync; new items are created disabled.
   - `/settings`: token authentication bar, config tabs (basic/auth/filter/danmaku/notifiers/advanced), notifier CRUD + test, QR login dialog.
