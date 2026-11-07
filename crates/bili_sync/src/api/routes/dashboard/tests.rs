@@ -8,7 +8,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use bili_sync_entity::video;
 use parking_lot::RwLock;
-use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait};
+use sea_orm::ActiveValue::Set;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use serde_json::Value;
 use tower::ServiceExt;
 
