@@ -9,7 +9,7 @@
 ## Sources of truth
 
 - Download layout: `crates/bili_sync/src/workflow.rs` `download_video_pages` and `download_page`.
-- Organization output: `crates/bili_sync/src/organization.rs` plans and writes a separate STRM library from existing download paths; original videos are not moved.
+- Organization output: `crates/bili_sync/src/organization.rs` plans a separate hard-link library from existing download paths; original videos are not moved.
 - Authoritative NFO schema: `crates/bili_sync/src/utils/nfo.rs` (`NFO::{Movie,TVShow,Upper,Episode}`, `ToNFO`, and the snapshot unit test). Do not hand-write XML elsewhere.
 - Authoritative path rendering: `PathSafeTemplate::path_safe_render` in `crates/bili_sync/src/config/item.rs` plus `crates/bili_sync/src/config/handlebar.rs` (`video_name`, `page_name`, `*_default_path` templates).
 - Authoritative danmaku output: `crates/bili_sync/src/bilibili/danmaku/writer.rs` (`DanmakuWriter::write`) and `ass_writer.rs`.
@@ -58,8 +58,8 @@
 ## Organization output
 
 - Rules use separate source and output paths. TV rules group by uploader name, use Season 1 and persist episode numbers by `(bvid, cid)`; new episodes append after the historical maximum. Movie rules require explicit video selection for execution and treat multi-page videos as versions.
-- STRM files reference local source video paths. NFO files use the existing serializer; available artwork, subtitles and ASS files are copied alongside the STRM. Existing destination files are not overwritten. Execution reports missing files, conflicts and write failures.
-- Moving or deleting a source video breaks its STRM. Validation rejects overlapping rule paths. The execute API is temporarily disabled: the current writer cannot guarantee safety against concurrent filesystem changes. Preview remains available. The existing writer requires filesystem hard-link support; no production-safe replacement has been integrated.
+- Video outputs are hard links to downloaded video files. NFO files use the existing serializer; available artwork, subtitles and ASS files are copied alongside the video. Existing destination files are not overwritten. Legacy STRM records cause a conflict and are not migrated or deleted.
+- Hard links require a compatible filesystem shared by source and destination; cross-filesystem or unsupported operations fail without copying the video. Both names refer to the same data, so modifying either file changes the other; removing one link leaves the other intact. Validation rejects overlapping rule paths. Path checks and writes are not atomic with respect to external directory or mount changes: operators must prevent other processes from moving or replacing output directories, their ancestors, or mounts during execution.
 
 ## Constraints and failures
 

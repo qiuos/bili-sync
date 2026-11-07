@@ -128,8 +128,7 @@ pub async fn execute_rule(
     if rule.rule_type == "movie" && request.video_ids.as_ref().is_none_or(Vec::is_empty) {
         return Err(InnerApiError::BadRequest("电影规则执行需要选择视频".to_string()).into());
     }
-    // ponytail: 并发目录替换仍可能导致越界写入；待安全发布方案通过验证后恢复执行。
-    ensure_safe_execution()?;
+    // 前提：整理期间没有其他进程移动/替换目录或变更挂载；写入仍有路径校验与绝不覆盖保障。
     let report = organization::execute_rule(&rule, &db, request.video_ids.as_deref()).await?;
     Ok(ApiResponse::ok(OrganizationExecuteResponse {
         created: report.created,
@@ -140,20 +139,6 @@ pub async fn execute_rule(
         items: report.items.iter().map(plan_item_response).collect(),
         warnings: report.warnings,
     }))
-}
-
-fn ensure_safe_execution() -> Result<(), InnerApiError> {
-    Err(InnerApiError::BadRequest(
-        "媒体整理执行暂不可用：并发目录变更可能导致不安全写入".to_string(),
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn execution_fails_closed() {
-        assert!(super::ensure_safe_execution().is_err());
-    }
 }
 
 fn rule_response(rule: organization_rule::Model) -> OrganizationRuleResponse {

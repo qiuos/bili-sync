@@ -155,7 +155,7 @@
 						class="font-mono text-sm"
 					/>
 					<p class="text-muted-foreground text-xs">
-						STRM 媒体库目录，须为绝对路径；不能与任何源目录或其他输出目录相同或互相嵌套。
+						硬链接媒体库目录，须为绝对路径且与源文件位于同一文件系统；不能与任何源目录或其他输出目录相同或互相嵌套。
 					</p>
 				</div>
 			</div>

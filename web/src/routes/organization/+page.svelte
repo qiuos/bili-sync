@@ -128,7 +128,7 @@
 			<FolderSyncIcon class="text-muted-foreground/40 mx-auto h-10 w-10" aria-hidden="true" />
 			<p class="text-muted-foreground text-sm">还没有整理规则</p>
 			<p class="text-muted-foreground/70 text-xs">
-				创建规则把下载目录里的视频整理成 Emby 可用的 STRM 媒体库
+				创建规则，将下载的视频整理成 Emby 可用的硬链接媒体库
 			</p>
 			<Button size="sm" class="cursor-pointer" onclick={openCreate}>
 				<PlusIcon class="mr-1.5 h-4 w-4" aria-hidden="true" />
@@ -230,7 +230,7 @@
 				确定要删除规则「<strong>{deletingRule?.name}</strong>」吗？ 该规则的整理记录将被<span
 					class="text-destructive font-medium">永久删除且无法恢复</span
 				>，电视剧已分配的集号随之丢失，之后重新整理会按新规则重新编号；<span
-					class="text-destructive font-medium">已生成的 STRM 和元数据文件仍保留在磁盘上</span
+					class="text-destructive font-medium">已生成的视频链接和元数据文件仍保留在磁盘上</span
 				>。
 			</AlertDialog.Description>
 		</AlertDialog.Header>

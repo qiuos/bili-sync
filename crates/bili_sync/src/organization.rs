@@ -1,6 +1,7 @@
-//! 媒体整理：将已下载的视频以 STRM 形式组织为 Emby 媒体库目录（电视剧/电影）。
-//! 原视频永远只读；所有写入都发生在规则的输出目录内，且绝不覆盖任何已存在的文件（只补缺）。
-//! 执行全程持全局锁串行进行，持久记录先于文件写入，保证失败后无不可恢复孤儿。
+//! 媒体整理：将已下载的视频以硬链接形式组织为 Emby 媒体库目录（电视剧/电影），并生成 NFO/封面/字幕弹幕等配套文件。
+//! 原视频永远只读（硬链接与源视频共享同一文件数据，绝不复制视频、绝不修改源文件）；所有写入都发生在规则的
+//! 输出目录内，且绝不覆盖任何已存在的文件（只补缺）。执行全程持全局锁串行进行，持久记录先于文件写入，
+//! 保证失败后无不可恢复孤儿。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -154,8 +155,8 @@ pub struct PendingFile {
 
 #[derive(Debug, Clone)]
 pub enum PendingContent {
-    /// 写入 STRM：内容为源视频文件的绝对路径
-    Strm(PathBuf),
+    /// 与源视频文件建立硬链接（绝不复制视频、绝不覆盖）
+    HardLink(PathBuf),
     /// 写入预渲染好的 NFO XML
     Xml(String),
     /// 从源目录复制文件（封面/字幕/弹幕）
@@ -191,7 +192,7 @@ pub struct PlanItem {
     pub series: Option<String>,
     pub episode: Option<i32>,
     pub action: ItemAction,
-    /// STRM 目标路径
+    /// 视频硬链接目标路径
     pub target: Option<PathBuf>,
     pub files: Vec<PendingFile>,
     /// 附加提示（如部分配套文件已存在被跳过）
@@ -392,7 +393,7 @@ async fn collect_source_videos(
     Ok((candidates, missing_pages, undownloaded))
 }
 
-/// 分P路径解析符号链接后必须位于源目录内：防止 DB 路径被改动或符号链接让 STRM 指向源目录之外。
+/// 分P路径解析符号链接后必须位于源目录内：防止 DB 路径被改动或符号链接让硬链接/复制指向源目录之外。
 /// 路径无法解析（文件不存在/失效链接）时返回 true，交由后续存在性检查归入缺失。
 fn page_path_within_source(path: &str, source: &Path) -> bool {
     match std::fs::canonicalize(path) {
@@ -739,6 +740,22 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
             }
             _ => {}
         }
+        // 旧版 STRM 历史记录保守冲突：硬链接输出绝不迁移或改写既有 STRM 记录与文件，整组跳过
+        if own_rows
+            .iter()
+            .any(|row| row.series.as_deref() == Some(series.as_str()) && row.path.ends_with(".strm"))
+        {
+            plan.warnings.push(format!(
+                "剧集「{series}」存在旧版 STRM 整理记录，硬链接输出不支持迁移，整组跳过"
+            ));
+            push_tv_conflict_group(
+                &mut plan,
+                entries,
+                &series,
+                "存在旧版 STRM 整理记录，硬链接输出不支持迁移".to_string(),
+            );
+            continue;
+        }
         used_series_stems.insert(stem_key, series.clone());
         let season_dir = series_dir.join("Season 1");
         let stem = format!("{series_stem} - S01E");
@@ -846,7 +863,7 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
             let episode = episode_of[&page.id];
             let target_stem = format!("{stem}{episode:0>2}");
             let mp4 = PathBuf::from(page.path.as_ref().expect("checked above"));
-            let strm = season_dir.join(format!("{target_stem}.strm"));
+            let link = season_dir.join(format!("{target_stem}.mp4"));
             let action = if own.contains_key(&page_key(video, page)) {
                 ItemAction::Refresh
             } else if let Some(other_rule_id) = other_keys.get(&page_key(video, page)) {
@@ -854,7 +871,7 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
                     "该文件已被规则「{}」整理",
                     other_rules.get(other_rule_id).map(String::as_str).unwrap_or("未知")
                 ))
-            } else if path_occupied(&strm) {
+            } else if path_occupied(&link) {
                 ItemAction::Exists
             } else {
                 ItemAction::Create
@@ -867,8 +884,8 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
             };
             let mut files = vec![
                 PendingFile {
-                    target: strm.clone(),
-                    content: PendingContent::Strm(mp4.clone()),
+                    target: link.clone(),
+                    content: PendingContent::HardLink(mp4.clone()),
                 },
                 PendingFile {
                     target: season_dir.join(format!("{target_stem}.nfo")),
@@ -893,7 +910,7 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
                 series: Some(series.clone()),
                 episode: Some(episode),
                 action,
-                target: Some(strm),
+                target: Some(link),
                 files,
                 message: None,
             });
@@ -1130,6 +1147,33 @@ async fn plan_movie(
             }
             continue;
         }
+        // 旧版 STRM 历史记录保守冲突：硬链接输出绝不迁移或改写既有 STRM 记录与文件，整组跳过
+        if own_rows
+            .iter()
+            .any(|row| row.bvid == video.bvid && row.path.ends_with(".strm"))
+        {
+            plan.warnings.push(format!(
+                "视频「{}」（{}）存在旧版 STRM 整理记录，硬链接输出不支持迁移，整组跳过",
+                video.name, video.bvid
+            ));
+            for page in downloadable {
+                plan.items.push(PlanItem {
+                    video_id: video.id,
+                    page_id: page.id,
+                    bvid: video.bvid.clone(),
+                    cid: page.cid,
+                    video_name: video.name.clone(),
+                    page_name: page.name.clone(),
+                    series: None,
+                    episode: None,
+                    action: ItemAction::Conflict("存在旧版 STRM 整理记录，硬链接输出不支持迁移".to_string()),
+                    target: None,
+                    files: Vec::new(),
+                    message: None,
+                });
+            }
+            continue;
+        }
         used_movie_stems.insert(stem_key, video.bvid.clone());
         let multi_page = video.single_page == Some(false);
         if multi_page && downloadable.len() > 8 {
@@ -1146,10 +1190,10 @@ async fn plan_movie(
                 movie_stem.clone()
             };
             let mp4 = PathBuf::from(page.path.as_ref().expect("checked above"));
-            let strm = folder.join(format!("{stem}.strm"));
+            let link = folder.join(format!("{stem}.mp4"));
             let action = if let Some(row) = own.get(&page_key(&video, page)) {
                 // 记录的目标路径与当前计算结果不一致说明视频被重命名等，按冲突处理
-                let computed = strm.to_string_lossy().to_string();
+                let computed = link.to_string_lossy().to_string();
                 if row.path != computed {
                     ItemAction::Conflict(format!(
                         "该分P已记录的目标路径（{}）与当前计算结果不一致，请先删除该规则的整理记录再重新整理",
@@ -1163,15 +1207,15 @@ async fn plan_movie(
                     "该文件已被规则「{}」整理",
                     other_rules.get(other_rule_id).map(String::as_str).unwrap_or("未知")
                 ))
-            } else if path_occupied(&strm) {
+            } else if path_occupied(&link) {
                 ItemAction::Exists
             } else {
                 ItemAction::Create
             };
             let mut files = vec![
                 PendingFile {
-                    target: strm.clone(),
-                    content: PendingContent::Strm(mp4.clone()),
+                    target: link.clone(),
+                    content: PendingContent::HardLink(mp4.clone()),
                 },
                 PendingFile {
                     target: folder.join(format!("{stem}.nfo")),
@@ -1200,7 +1244,7 @@ async fn plan_movie(
                 series: None,
                 episode: None,
                 action,
-                target: Some(strm),
+                target: Some(link),
                 files,
                 message: None,
             });
@@ -1224,7 +1268,7 @@ async fn plan_movie(
 
 /// 执行计划：extras 与分页级文件一律只补缺，绝不覆盖任何已存在的输出（含既有用户字幕等）；
 /// 持久记录先于文件写入——数据库失败则未写任何文件，文件写入失败则记录已在，刷新即可补齐恢复。
-/// ponytail: ensure_path_within 前后两次检查之间存在理论 TOCTOU 窗口；如需绝对闭合需引入目录专有锁或 inotify 监控。
+/// ponytail: 路径检查与写入之间仍有 TOCTOU 窗口；整理期间须避免其他进程移动或替换目录及挂载。
 async fn execute_plan(
     rule: &organization_rule::Model,
     plan: Plan,
@@ -1388,8 +1432,10 @@ impl ItemAction {
     }
 }
 
-/// 安全写入：先写唯一命名的临时文件（create_new 原子创建），再以硬链接原子落到目标位置——
-/// hard_link 在目标已存在时失败，因此并发/竞态下也不会覆盖任何既有文件；临时文件随后删除。
+/// 安全写入：视频输出为对源视频的硬链接（内核原子创建，目标已存在即失败，绝不覆盖；跨文件系统/
+/// 不支持硬链接时明确报错，绝不复制视频回退）。其余文件先写唯一命名的临时文件（create_new 原子创建），
+/// 再以硬链接原子落到目标位置——hard_link 在目标已存在时失败，因此绝不覆盖任何既有文件；临时文件随后删除。
+/// 注意：原子创建不解决目录竞态；整理期间须避免其他进程移动或替换目录及挂载。
 /// ponytail: 不支持硬链接的文件系统（部分 NAS/网络盘/exFAT）会在此报错，无法整理该位置。
 async fn write_pending_file(output_root: &Path, file: &PendingFile) -> Result<()> {
     ensure_path_within(output_root, &file.target)?;
@@ -1398,6 +1444,19 @@ async fn write_pending_file(output_root: &Path, file: &PendingFile) -> Result<()
     }
     // 目录创建后复查：祖先路径中途被替换为符号链接时拒绝写入
     ensure_path_within(output_root, &file.target)?;
+    // 视频输出是对源视频的硬链接：内核原子创建，目标已存在即失败（绝不覆盖，含并发场景；
+    // 但这不解决目录级竞态）。跨文件系统/文件系统不支持时明确报错，绝不复制视频回退
+    if let PendingContent::HardLink(source) = &file.content {
+        return match tokio::fs::hard_link(source, &file.target).await {
+            Ok(()) => Ok(()),
+            // 目标已存在（含并发创建）：保持未覆盖语义，直接失败
+            Err(_) if path_occupied(&file.target) => Err(anyhow::anyhow!("目标已存在，未覆盖")),
+            Err(e) => Err(e).context(format!(
+                "无法为源视频「{}」创建硬链接；源与目标可能不在同一文件系统，或该文件系统不支持硬链接，该位置无法整理",
+                source.display()
+            )),
+        };
+    }
     let tmp = file.target.with_file_name(format!(
         "{}.{}.tmp",
         file.target.file_name().context("非法的目标路径")?.to_string_lossy(),
@@ -1410,12 +1469,12 @@ async fn write_pending_file(output_root: &Path, file: &PendingFile) -> Result<()
             .open(&tmp)
             .await?;
         match &file.content {
-            PendingContent::Strm(source) => dst.write_all(source.to_string_lossy().as_bytes()).await?,
             PendingContent::Xml(xml) => dst.write_all(xml.as_bytes()).await?,
             PendingContent::Copy(source) => {
                 let mut src = tokio::fs::File::open(source).await?;
                 tokio::io::copy(&mut src, &mut dst).await?;
             }
+            PendingContent::HardLink(_) => unreachable!("硬链接在上方分支处理，不走临时文件"),
         }
         dst.flush().await?;
         drop(dst);
@@ -1449,8 +1508,8 @@ fn find_video_poster(video_path: &str, first_page_path: Option<&str>) -> Option<
     poster.is_file().then_some(poster)
 }
 
-/// 收集源视频旁的配套文件（字幕 srt、弹幕 ass、单集缩略图/封面），映射为输出目录中与 STRM 同名的文件。
-/// STRM 播放时 Emby 只读取与其同目录、同主文件名的外挂字幕/弹幕，因此必须复制到输出侧。
+/// 收集源视频旁的配套文件（字幕 srt、弹幕 ass、单集缩略图/封面），映射为输出目录中与视频硬链接同名的文件。
+/// Emby 播放视频时只读取与其同目录、同主文件名的外挂字幕/弹幕，因此必须复制到输出侧。
 fn collect_sidecars(source_video: &Path, target_stem: &str, target_dir: &Path) -> Vec<PendingFile> {
     let mut files = Vec::new();
     let Some(dir) = source_video.parent() else {
@@ -1499,12 +1558,31 @@ mod tests {
 
     use super::*;
 
+    /// 测试临时根：优先取环境变量 BILI_SYNC_ORG_TEST_ROOT（指向已登记的任务临时根），缺省为系统临时目录；
+    /// 在其下用 UUID 创建唯一、不可预测的子目录（create_dir，已存在或失败即终止）。测试绝不删除任何目录，
+    /// 统一由登记的清理流程或系统临时目录策略回收。
     fn temp_root(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("bili-sync-org-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let base = std::env::var("BILI_SYNC_ORG_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let dir = base.join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&dir).unwrap();
         dir
     }
+
+    /// 硬链接与源文件同 inode 校验（Unix 语义）
+    #[cfg(unix)]
+    fn assert_same_inode(link: &Path, source: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(link).unwrap().ino(),
+            std::fs::metadata(source).unwrap().ino(),
+            "应为指向同一 inode 的硬链接"
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn assert_same_inode(_link: &Path, _source: &Path) {}
 
     async fn test_db(dir: &Path) -> DatabaseConnection {
         let db = sea_orm::Database::connect(format!("sqlite://{}?mode=rwc", dir.join("data.sqlite").display()))
@@ -1623,7 +1701,6 @@ mod tests {
         assert!(paths_overlap(&real_canonical, &alias_canonical));
         // ensure_path_within 拒绝把符号链接目录本身作为写入目标
         assert!(ensure_path_within(&root, &alias).is_err());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1654,7 +1731,6 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].1.len(), 2);
         assert!(missing.is_empty());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1708,12 +1784,10 @@ mod tests {
         let report = execute_rule(&rule, &db, None).await.unwrap();
         assert_eq!(report.created, 4);
         let season = output.join("张三").join("Season 1");
-        let strm = season.join("张三 - S01E04.strm");
-        assert_eq!(
-            std::fs::read_to_string(&strm).unwrap(),
-            mp4_a.to_string_lossy(),
-            "STRM 内容为源视频绝对路径"
-        );
+        let link = season.join("张三 - S01E04.mp4");
+        assert_same_inode(&link, &mp4_a);
+        assert!(mp4_a.is_file(), "源视频保持原样");
+        assert!(!season.join("张三 - S01E04.strm").exists(), "不再生成 STRM");
         // 单P集标题 = 视频标题；多P集标题 = 视频标题 - 分P标题；tvshow.nfo 标题 = UP 用户名
         let nfo_a = std::fs::read_to_string(season.join("张三 - S01E04.nfo")).unwrap();
         assert!(nfo_a.contains("<title>视频BV1a</title>"), "单P集标题应为视频标题");
@@ -1776,7 +1850,6 @@ mod tests {
             vec![1, 2, 3]
         );
         let _ = page_a.id; // 保持变量使用
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// 刷新绝不覆盖用户预先放置/修改的输出文件（包括字幕），只补缺
@@ -1805,7 +1878,7 @@ mod tests {
         let report = execute_rule(&rule, &db, None).await.unwrap();
         assert_eq!(report.created, 1);
         let season = output.join("张三").join("Season 1");
-        let strm = season.join("张三 - S01E01.strm");
+        let link = season.join("张三 - S01E01.mp4");
         let srt = season.join("张三 - S01E01.zh-CN.srt");
 
         // 用户修改本规则生成的字幕：刷新后保持用户内容不变，只补缺缺失文件
@@ -1822,14 +1895,17 @@ mod tests {
         assert!(season.join("张三 - S01E01.nfo").is_file(), "缺失文件被补齐");
         assert!(report.items[0].message.as_deref().is_some_and(|m| m.contains("未覆盖")));
 
-        // 用户替换了 STRM 本体：刷新跳过该文件（不覆盖），其余文件补缺，记录更新
-        std::fs::write(&strm, b"user strm").unwrap();
+        // 用户替换了视频硬链接本体：刷新跳过该文件（不覆盖），其余文件补缺，记录更新
+        std::fs::write(&link, b"user video").unwrap();
         let report = execute_rule(&rule, &db, None).await.unwrap();
         assert_eq!(report.refreshed, 1);
         assert_eq!(report.failed, 0);
-        assert_eq!(std::fs::read(&strm).unwrap(), b"user strm", "不得覆盖用户替换的 STRM");
+        assert_eq!(
+            std::fs::read(&link).unwrap(),
+            b"user video",
+            "不得覆盖用户替换的视频硬链接"
+        );
         assert!(report.items[0].message.as_deref().is_some_and(|m| m.contains("未覆盖")));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1878,9 +1954,9 @@ mod tests {
                     .and_then(|t| t.file_name().map(|n| n.to_string_lossy().to_string()))
             })
             .collect();
-        assert_eq!(versions[0], "视频BV1m2 (2019) - P01.strm", "多P版本名由固有 pid 决定");
-        assert_eq!(versions[1], "视频BV1m2 (2019) - P02.strm");
-        assert_eq!(versions[2], "视频BV1m2 (2019) - P06.strm");
+        assert_eq!(versions[0], "视频BV1m2 (2019) - P01.mp4", "多P版本名由固有 pid 决定");
+        assert_eq!(versions[1], "视频BV1m2 (2019) - P02.mp4");
+        assert_eq!(versions[2], "视频BV1m2 (2019) - P06.mp4");
 
         // 执行必须显式选择
         assert!(
@@ -1890,10 +1966,8 @@ mod tests {
         let report = execute_rule(&rule, &db, Some(&[video_m1.id])).await.unwrap();
         assert_eq!(report.created, 1);
         let folder_m1 = output.join("视频BV1m1 (2019)");
-        assert_eq!(
-            std::fs::read_to_string(folder_m1.join("视频BV1m1 (2019).strm")).unwrap(),
-            mp4_m1.to_string_lossy()
-        );
+        assert_same_inode(&folder_m1.join("视频BV1m1 (2019).mp4"), &mp4_m1);
+        assert!(mp4_m1.is_file(), "源视频保持原样");
         assert!(folder_m1.join("poster.jpg").is_file());
 
         // 版本名稳定性：首P（pid 1）源文件缺失后其余版本命名不变；补回后命名一致
@@ -1919,8 +1993,8 @@ mod tests {
         assert_eq!(
             versions_missing,
             vec![
-                "视频BV1m2 (2019) - P02.strm".to_string(),
-                "视频BV1m2 (2019) - P06.strm".to_string(),
+                "视频BV1m2 (2019) - P02.mp4".to_string(),
+                "视频BV1m2 (2019) - P06.mp4".to_string(),
             ],
             "首P缺失不得改变其它版本的命名"
         );
@@ -1928,8 +2002,11 @@ mod tests {
         let report = execute_rule(&rule, &db, Some(&[video_m2.id])).await.unwrap();
         assert_eq!(report.created, 3, "三个版本全部创建");
         let folder_m2 = output.join("视频BV1m2 (2019)");
-        assert!(folder_m2.join("视频BV1m2 (2019) - P01.strm").is_file());
-        assert!(folder_m2.join("视频BV1m2 (2019) - P06.strm").is_file());
+        assert_same_inode(
+            &folder_m2.join("视频BV1m2 (2019) - P01.mp4"),
+            &video_m2_dir.join("v1.mp4"),
+        );
+        assert!(folder_m2.join("视频BV1m2 (2019) - P06.mp4").is_file());
 
         // 记录的目标路径与当前计算结果不一致：按冲突处理（选一个多P版本的分页记录）
         let drifted = organization_output::Entity::find()
@@ -1941,7 +2018,7 @@ mod tests {
             .find(|row| row.path.contains(" - P"))
             .unwrap();
         let mut active: organization_output::ActiveModel = drifted.into();
-        active.path = Set("/somewhere/else.strm".to_string());
+        active.path = Set("/somewhere/else.mp4".to_string());
         active.update(&db).await.unwrap();
         let plan = preview_rule(&rule, &db, Some(&[video_m2.id])).await.unwrap();
         assert!(
@@ -1957,16 +2034,15 @@ mod tests {
             .exec(&db)
             .await
             .unwrap();
-        std::fs::write(folder_m1.join("视频BV1m1 (2019).strm"), b"user file").unwrap();
+        std::fs::write(folder_m1.join("视频BV1m1 (2019).mp4"), b"user file").unwrap();
         let report = execute_rule(&rule, &db, Some(&[video_m1.id])).await.unwrap();
         assert_eq!(report.skipped, 1);
         assert_eq!(report.created, 0);
         assert_eq!(
-            std::fs::read(folder_m1.join("视频BV1m1 (2019).strm")).unwrap(),
+            std::fs::read(folder_m1.join("视频BV1m1 (2019).mp4")).unwrap(),
             b"user file",
             "不覆盖非规则文件"
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// 记录先行：数据库失败时不得写入任何分页文件（无孤儿）；恢复后刷新即可完成整理
@@ -2021,8 +2097,7 @@ mod tests {
         .unwrap();
         let report = execute_rule(&rule, &db, None).await.unwrap();
         assert_eq!(report.created, 1, "恢复后正常创建");
-        assert!(season.join("张三 - S01E01.strm").is_file());
-        let _ = std::fs::remove_dir_all(root);
+        assert!(season.join("张三 - S01E01.mp4").is_file());
     }
 
     /// 并发执行被全局锁串行化：两次执行各自完整落地，集号分配与记录无竞争
@@ -2066,11 +2141,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1, "不产生重复记录");
-        assert_eq!(
-            std::fs::read_to_string(output.join("张三").join("Season 1").join("张三 - S01E01.strm")).unwrap(),
-            mp4.to_string_lossy()
-        );
-        let _ = std::fs::remove_dir_all(root);
+        assert_same_inode(&output.join("张三").join("Season 1").join("张三 - S01E01.mp4"), &mp4);
     }
 
     /// 输出目录内出现符号链接时：相关条目全部失败且不落记录，链接目标目录不受影响；移除链接后刷新可补齐
@@ -2118,14 +2189,7 @@ mod tests {
         std::fs::remove_file(output.join("张三")).unwrap();
         let report = execute_rule(&rule, &db, None).await.unwrap();
         assert_eq!(report.created, 1);
-        assert!(
-            output
-                .join("张三")
-                .join("Season 1")
-                .join("张三 - S01E01.strm")
-                .is_file()
-        );
-        let _ = std::fs::remove_dir_all(root);
+        assert!(output.join("张三").join("Season 1").join("张三 - S01E01.mp4").is_file());
     }
 
     /// 跨次整理与既有目录归属：用户已有目录、同次/跨次同名不同作品、大小写别名都必须保守冲突，
@@ -2186,7 +2250,7 @@ mod tests {
             episode: Set(Some(1)),
             path: Set(user_dir
                 .join("Season 1")
-                .join("UP - S01E01.strm")
+                .join("UP - S01E01.mp4")
                 .to_string_lossy()
                 .to_string()),
             ..Default::default()
@@ -2205,7 +2269,7 @@ mod tests {
         assert_eq!(report.refreshed, 1);
         assert_eq!(std::fs::read_to_string(user_dir.join("用户文件.txt")).unwrap(), "keep");
         assert!(
-            user_dir.join("Season 1").join("UP - S01E01.strm").is_file(),
+            user_dir.join("Season 1").join("UP - S01E01.mp4").is_file(),
             "历史归属目录内补齐文件"
         );
         let kept = organization_output::Entity::find_by_id(tv_row.id)
@@ -2252,8 +2316,8 @@ mod tests {
         let report = execute_rule(&movie_rule, &db, Some(&[video_a.id])).await.unwrap();
         assert_eq!(report.created, 1, "目录无争议时首个可整理");
         let shared_dir = output.join("同名电影 (2024)");
-        let a_strm = shared_dir.join("同名电影 (2024).strm");
-        let a_content = std::fs::read(&a_strm).unwrap();
+        let a_mp4 = shared_dir.join("同名电影 (2024).mp4");
+        let a_content = std::fs::read(&a_mp4).unwrap();
         let report = execute_rule(&movie_rule, &db, Some(&[video_b.id])).await.unwrap();
         assert_eq!(report.created, 0, "跨次同名不同 BV 不得写入既有目录");
         assert!(
@@ -2264,9 +2328,9 @@ mod tests {
                 .all(|item| matches!(item.action, ItemAction::Conflict(_))),
             "跨次同名不同 BV 必须冲突"
         );
-        assert_eq!(std::fs::read(&a_strm).unwrap(), a_content, "既有作品的文件不得被改动");
+        assert_eq!(std::fs::read(&a_mp4).unwrap(), a_content, "既有作品的文件不得被改动");
         assert!(
-            !shared_dir.join("同名电影 (2024) - P01.strm").exists(),
+            !shared_dir.join("同名电影 (2024) - P01.mp4").exists(),
             "不得把另一作品写入既有目录"
         );
 
@@ -2331,7 +2395,6 @@ mod tests {
             "不得经由大小写别名写入用户目录"
         );
         let _ = report;
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// 目录不存在时也必须按持久记录判归属（记录可能先于写入，或目录被删除/移动）；
@@ -2431,7 +2494,7 @@ mod tests {
             path: Set(output
                 .join("UP_乙")
                 .join("Season 1")
-                .join("x.strm")
+                .join("x.mp4")
                 .to_string_lossy()
                 .to_string()),
             ..Default::default()
@@ -2513,7 +2576,6 @@ mod tests {
             find_existing_name(&root.join("never-created"), "UP").unwrap(),
             ExistingName::None
         ));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// 混合历史记录：同目录既有本映射记录又有不匹配记录（本规则其它作品/其它规则）时一律拒绝；
@@ -2555,7 +2617,7 @@ mod tests {
                 episode: Set(Some(1)),
                 path: Set(up_dir
                     .join("Season 1")
-                    .join(format!("{series} - S01E01.strm"))
+                    .join(format!("{series} - S01E01.mp4"))
                     .to_string_lossy()
                     .to_string()),
                 ..Default::default()
@@ -2601,7 +2663,7 @@ mod tests {
             cid: Set(9),
             series: Set(Some("UP".to_string())),
             episode: Set(Some(5)),
-            path: Set(up_dir.join("Season 1").join("x.strm").to_string_lossy().to_string()),
+            path: Set(up_dir.join("Season 1").join("x.mp4").to_string_lossy().to_string()),
             ..Default::default()
         }
         .insert(&db)
@@ -2634,7 +2696,6 @@ mod tests {
             &output.join("UPX").join("a.strm").to_string_lossy(),
             &up_lower
         ));
-        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Unicode NFC/NFD 别名：历史记录路径与现有目录在 NFC 归一化 + 小写化后识别为同一前缀；
@@ -2754,6 +2815,159 @@ mod tests {
             .is_ok(),
             "路径与类型未变化（仅改名）应允许"
         );
-        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 硬链接输出：与源视频同 inode（不复制、源保持原样）、不再生成 STRM；
+    /// 旧版 STRM 整理记录必须保守冲突（TV 与电影均整组跳过），绝不迁移或改写
+    #[tokio::test]
+    async fn test_hard_link_output_and_legacy_strm_conflict() {
+        let root = temp_root("hardlink");
+        let source = root.join("source");
+        let output = root.join("output");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let db = test_db(&root).await;
+        let time = chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let source_canonical = std::fs::canonicalize(&source).unwrap();
+        let output_canonical = std::fs::canonicalize(&output).unwrap();
+
+        // TV：存在旧版 STRM 记录（含目录内真实 STRM 文件）→ 整组保守冲突，绝不迁移、不改写
+        let tv_rule = organization_rule::ActiveModel {
+            name: Set("剧库".to_string()),
+            rule_type: Set("tv".to_string()),
+            source_path: Set(source_canonical.to_string_lossy().to_string()),
+            output_path: Set(output_canonical.to_string_lossy().to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let (_tv_video, tv_page, _) = single_video(&db, "BVtv", "UP", &source.join("tv"), time).await;
+        let legacy_dir = output.join("UP").join("Season 1");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_strm = legacy_dir.join("UP - S01E01.strm");
+        std::fs::write(&legacy_strm, b"/old/strm/path.mp4").unwrap();
+        organization_output::ActiveModel {
+            rule_id: Set(tv_rule.id),
+            page_id: Set(tv_page.id),
+            bvid: Set("BVtv".to_string()),
+            cid: Set(tv_page.cid),
+            series: Set(Some("UP".to_string())),
+            episode: Set(Some(1)),
+            path: Set(legacy_strm.to_string_lossy().to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        // 追加同一 UP 的另一投稿：无论候选当前会排到哪个集号（新投稿≠旧记录的 E01），整组保守冲突
+        let (_tv_b_video, _tv_b_page, _) = single_video(&db, "BVtvb", "UP", &source.join("tvb"), time).await;
+        let plan = preview_rule(&tv_rule, &db, None).await.unwrap();
+        assert_eq!(plan.items.len(), 2, "同一 UP 的两个投稿都参与整组判定");
+        assert!(
+            plan.items
+                .iter()
+                .all(|item| matches!(item.action, ItemAction::Conflict(_))),
+            "旧版 STRM 记录必须整组保守冲突（无论候选集号），实际：{:?}",
+            plan.items.iter().map(|item| &item.action).collect::<Vec<_>>()
+        );
+        let report = execute_rule(&tv_rule, &db, None).await.unwrap();
+        assert_eq!(report.created + report.refreshed, 0, "旧 STRM 记录不得被静默迁移");
+        assert_eq!(
+            std::fs::read(&legacy_strm).unwrap(),
+            b"/old/strm/path.mp4",
+            "既有 STRM 文件不得被改写"
+        );
+        assert!(!legacy_dir.join("UP - S01E01.mp4").exists(), "不得静默迁移为 mp4");
+
+        // 同一规则下的新剧集正常整理为硬链接：同 inode、源视频保持原样
+        let (_tv2_video, _tv2_page, tv2_mp4) = single_video(&db, "BVtv2", "导演", &source.join("tv2"), time).await;
+        let plan = preview_rule(&tv_rule, &db, None).await.unwrap();
+        let item = plan.items.iter().find(|item| item.bvid == "BVtv2").unwrap();
+        assert_eq!(item.action, ItemAction::Create);
+        assert_eq!(
+            item.target
+                .as_ref()
+                .and_then(|t| t.extension())
+                .and_then(|e| e.to_str()),
+            Some("mp4"),
+            "视频输出目标扩展名应为 .mp4"
+        );
+        let report = execute_rule(&tv_rule, &db, None).await.unwrap();
+        assert_eq!(report.created, 1);
+        let link = output.join("导演").join("Season 1").join("导演 - S01E01.mp4");
+        assert_same_inode(&link, &tv2_mp4);
+        assert!(tv2_mp4.is_file(), "源视频保持原样");
+        assert_eq!(
+            std::fs::read(&link).unwrap(),
+            std::fs::read(&tv2_mp4).unwrap(),
+            "硬链接与源视频内容一致"
+        );
+
+        // 电影：存在旧版 STRM 记录 → 整组保守冲突，绝不迁移、不改写
+        let movie_rule = organization_rule::ActiveModel {
+            name: Set("电影库".to_string()),
+            rule_type: Set("movie".to_string()),
+            source_path: Set(source_canonical.to_string_lossy().to_string()),
+            output_path: Set(output_canonical.to_string_lossy().to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let (movie_video, movie_page, _) = single_video(&db, "BVmv", "编导", &source.join("movie"), time).await;
+        let legacy_movie_dir = output.join(format!("视频BVmv ({})", time.year()));
+        std::fs::create_dir_all(&legacy_movie_dir).unwrap();
+        let legacy_movie_strm = legacy_movie_dir.join(format!("视频BVmv ({}).strm", time.year()));
+        std::fs::write(&legacy_movie_strm, b"/old/movie.mp4").unwrap();
+        organization_output::ActiveModel {
+            rule_id: Set(movie_rule.id),
+            page_id: Set(movie_page.id),
+            bvid: Set("BVmv".to_string()),
+            cid: Set(movie_page.cid),
+            series: Set(None),
+            episode: Set(None),
+            path: Set(legacy_movie_strm.to_string_lossy().to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let plan = preview_rule(&movie_rule, &db, Some(&[movie_video.id])).await.unwrap();
+        assert!(
+            plan.items
+                .iter()
+                .all(|item| matches!(item.action, ItemAction::Conflict(_))),
+            "电影旧版 STRM 记录必须整组保守冲突，实际：{:?}",
+            plan.items.iter().map(|item| &item.action).collect::<Vec<_>>()
+        );
+        let report = execute_rule(&movie_rule, &db, Some(&[movie_video.id])).await.unwrap();
+        assert_eq!(report.created + report.refreshed, 0);
+        assert_eq!(std::fs::read(&legacy_movie_strm).unwrap(), b"/old/movie.mp4");
+        assert!(
+            !legacy_movie_dir
+                .join(format!("视频BVmv ({}).mp4", time.year()))
+                .exists(),
+            "不得静默迁移为 mp4"
+        );
+    }
+
+    /// 硬链接失败必须明确报错（源缺失；跨文件系统/不支持硬链接走同一失败路径，绝不复制回退）
+    #[tokio::test]
+    async fn test_hard_link_failure_is_explicit() {
+        let root = temp_root("hardlink-fail");
+        let output = root.join("output");
+        std::fs::create_dir_all(&output).unwrap();
+        let file = PendingFile {
+            target: output.join("a.mp4"),
+            content: PendingContent::HardLink(root.join("missing.mp4")),
+        };
+        let err = write_pending_file(&output, &file).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("硬链接"), "失败信息应说明硬链接无法创建：{message}");
+        assert!(!output.join("a.mp4").exists(), "失败后不得留下目标文件");
     }
 }
