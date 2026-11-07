@@ -4,7 +4,15 @@ use std::sync::LazyLock;
 
 use clap::Parser;
 
-pub static ARGS: LazyLock<Args> = LazyLock::new(Args::parse);
+pub static ARGS: LazyLock<Args> = LazyLock::new(|| {
+    if cfg!(test) {
+        // 测试框架（cargo test 二进制）会把 libtest 的过滤参数附在 argv 上，
+        // clap 解析会因 "unexpected argument" 报错退出；测试环境回退为仅程序名的解析，环境变量仍然生效
+        Args::parse_from(["bili-sync"])
+    } else {
+        Args::parse()
+    }
+});
 
 #[derive(Parser)]
 #[command(name = "Bili-Sync", version = detail_version(), about, long_about = None)]

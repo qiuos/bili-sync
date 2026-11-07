@@ -46,28 +46,31 @@
 	// 请求序号：后发请求胜出；关闭对话框自增，使在途响应过期被丢弃。
 	// 非响应式普通变量：请求计数与 effect 无关，避免被 Svelte 追踪引发重复触发或无限循环
 	let requestSeq = 0;
-	// 上一次 open 的值：关闭时自增在途请求序号。放在 effect 内不可追踪，避免触发循环
-	let lastOpen = false;
+
+	// 打开令牌：记录上次 effect 刷新时 open 的值，仅在开关沿动作一次。
+	// 非响应式普通变量，读写均不触发 effect，避免“依赖 open 又写 state”的循环
+	let lastEffectOpen = false;
 
 	$effect(() => {
 		// 只追踪 open 与 initialPath
 		if (open) {
 			// 仅首次打开时允许无效初始路径回退根目录；浏览中的错误就地提示
-			loadDirectory(initialPath, { fallbackRootOnError: true });
-		}
-	});
-
-	// open 由 true → false 时使在途响应过期并重置。独立 effect 只追踪 open，避免与 load 循环互写
-	$effect(() => {
-		if (!open && lastOpen) {
-			requestSeq += 1;
-		}
-		lastOpen = open;
-		if (!open) {
-			currentPath = '/';
-			parentPath = null;
-			entries = [];
-			error = '';
+			if (!lastEffectOpen) {
+				lastEffectOpen = true;
+				loadDirectory(initialPath, { fallbackRootOnError: true });
+			}
+		} else {
+			// 关闭对话框：使在途响应过期并复位状态与令牌
+			if (lastEffectOpen) {
+				lastEffectOpen = false;
+				// 完整复位，下次打开看到干净列表；在途响应因 requestSeq 自增而过期
+				requestSeq += 1;
+				currentPath = '/';
+				parentPath = null;
+				entries = [];
+				error = '';
+				loading = false;
+			}
 		}
 	});
 
@@ -111,10 +114,11 @@
 		open = false;
 	}
 
-	// 打开期间父组件若提前卸载/切换 pickerTarget，本组件可能被销毁，清理对话框状态
+	// 打开期间父组件若提前卸载/切换 pickerTarget，本组件可能被销毁，清理对话框状态。
+	// onclose 非响应式 prop，写入 untrack 结果，避免 effect 同时依赖 open 与回调
 	$effect(() => {
 		if (!open && onclose) {
-			onclose();
+			untrack(() => onclose?.());
 		}
 	});
 </script>

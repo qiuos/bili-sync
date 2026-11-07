@@ -37,7 +37,7 @@
   - `GET /api/videos/{id}/cover` serves an authenticated local image or a JSON 404 when unavailable.
   - `GET|POST /api/organization/rules`, `PUT|DELETE /api/organization/rules/{id}`, `POST /api/organization/rules/{id}/preview`, `POST /api/organization/rules/{id}/execute`. Movie preview can list candidates without IDs; movie execution requires explicit video IDs.
   - `GET /api/organization/directory?path=…` lists subdirectories of an existing absolute server/container path (`{ path, parent, entries: [{ path, name }] }`, directories only, sorted by name); empty `path` starts at `/`. Invalid paths return 400. Behind the same auth middleware; it exposes the server filesystem layout to the logged-in operator, not file contents.
-  - `GET /api/dashboard`, `POST /api/task/download`, `GET /api/ws` (WebSocket upgrade).
+  - `GET /api/dashboard` returns `DashBoardResponse { recent_videos: [RecentVideoInfo] }` — the 5 most-recently-added videos ordered by `created_at` desc then `id` desc; each item carries `id`, `name`, `valid`, `should_download`, the five-slot `download_status` tuple, and the naive-UTC `created_at` string (`YYYY-MM-DD HH:MM:SS`, frontend parses it as UTC). `POST /api/task/download`, `GET /api/ws` (WebSocket upgrade).
 
 ## Runtime paths and state transitions
 

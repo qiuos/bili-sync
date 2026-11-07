@@ -405,17 +405,26 @@ export interface Config {
 	version: number;
 }
 
-export interface DayCountPair {
-	day: string;
-	cnt: number;
+export interface DashBoardResponse {
+	recent_videos: RecentVideoInfo[];
 }
 
-export interface DashBoardResponse {
-	enabled_favorites: number;
-	enabled_collections: number;
-	enabled_submissions: number;
-	enable_watch_later: boolean;
-	videos_by_day: DayCountPair[];
+/** 仪表盘最近入库记录；download_status 与 VideoInfo 同为五元组 */
+export interface RecentVideoInfo {
+	id: number;
+	name: string;
+	valid: boolean;
+	should_download: boolean;
+	download_status: [number, number, number, number, number];
+	/** 数据库入库时间，即记录新增时间，与视频发布时间无关 */
+	created_at: string;
+}
+
+/** 日志流单条记录（WebSocket logs 事件 JSON） */
+export interface LogEntry {
+	timestamp: string;
+	level: string;
+	message: string;
 }
 
 export interface SysInfo {

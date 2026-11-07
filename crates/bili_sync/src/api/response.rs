@@ -180,19 +180,22 @@ pub struct VideoSourcesDetailsResponse {
     pub watch_later: Vec<VideoSourceDetail>,
 }
 
-#[derive(Serialize, FromQueryResult)]
-pub struct DayCountPair {
-    pub day: String,
-    pub cnt: i64,
-}
-
 #[derive(Serialize)]
 pub struct DashBoardResponse {
-    pub enabled_favorites: u64,
-    pub enabled_collections: u64,
-    pub enabled_submissions: u64,
-    pub enable_watch_later: bool,
-    pub videos_by_day: Vec<DayCountPair>,
+    pub recent_videos: Vec<RecentVideoInfo>,
+}
+
+#[derive(Serialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "video::Entity")]
+pub struct RecentVideoInfo {
+    pub id: i32,
+    pub name: String,
+    pub valid: bool,
+    pub should_download: bool,
+    #[serde(serialize_with = "serde_video_download_status")]
+    pub download_status: u32,
+    /// 数据库入库时间，即记录在数据库中新增的时间，与视频发布时间无关
+    pub created_at: String,
 }
 
 #[derive(Serialize, Clone, Copy)]
