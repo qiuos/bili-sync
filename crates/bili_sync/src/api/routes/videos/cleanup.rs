@@ -411,7 +411,8 @@ pub(super) async fn rollback_source_latest_row_at(
 #[cfg(test)]
 mod tests {
     use bili_sync_migration::{Migrator, MigratorTrait};
-    use sea_orm::{ActiveModelTrait, ActiveValue::Set, TryIntoModel};
+    use sea_orm::ActiveValue::Set;
+    use sea_orm::{ActiveModelTrait, TryIntoModel};
 
     use super::*;
     use crate::utils::status::STATUS_COMPLETED;
