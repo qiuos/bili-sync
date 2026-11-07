@@ -4,10 +4,18 @@ on:
   push:
     tags:
       - v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
+        type: string
 
 jobs:
   build-binary:
     uses: ./.github/workflows/build-binary.yaml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
   github-release:
     name: Create GitHub Release
     needs: build-binary
@@ -17,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Download release artifact
         uses: actions/download-artifact@v8
         with:
@@ -25,8 +35,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: bili-sync-rs*
-          tag_name: ${{ github.ref_name }}
-          draft: true
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          draft: ${{ github.event_name == 'push' }}
   docker-release:
     name: Create Docker Image
     needs: build-binary
@@ -37,6 +47,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Download release artifact
         uses: actions/download-artifact@v8
         with:
@@ -48,7 +60,7 @@ jobs:
           images: ghcr.io/qiuos/bili-sync-rs
           tags: |
             type=raw,value=latest
-            type=raw,value=${{ github.ref_name }}
+            type=raw,value=${{ inputs.tag || github.ref_name }}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
