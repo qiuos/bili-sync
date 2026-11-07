@@ -1,7 +1,10 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::extract::{Extension, Path, Query};
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bili_sync_entity::*;
@@ -31,6 +34,7 @@ pub(super) fn router() -> Router {
     Router::new()
         .route("/videos", get(get_videos))
         .route("/videos/{id}", get(get_video))
+        .route("/videos/{id}/cover", get(get_video_cover))
         .route(
             "/videos/{id}/clear-and-reset-status",
             post(clear_and_reset_video_status),
@@ -441,4 +445,50 @@ pub async fn update_filtered_video_status(
         updated_videos_count: all_videos.len(),
         updated_pages_count: all_pages.len(),
     }))
+}
+
+/// 返回视频的本地封面图片；文件缺失或视频未下载时返回 404，由前端展示占位。
+/// 路径完全由数据库记录推导，不接受任何用户提供的路径参数，且对结果做目录边界校验。
+pub async fn get_video_cover(
+    Path(id): Path<i32>,
+    Extension(db): Extension<DatabaseConnection>,
+) -> Result<Response, ApiError> {
+    let Some(video) = video::Entity::find_by_id(id).one(&db).await? else {
+        return Err(InnerApiError::NotFound(id).into());
+    };
+    let Some(cover) = find_local_cover(&video, &db).await else {
+        return Ok(ApiResponse::<()>::not_found("本地封面不存在").into_response());
+    };
+    let mime = match cover.extension().and_then(|ext| ext.to_str()) {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => "image/jpeg",
+    };
+    let bytes = tokio::fs::read(&cover).await?;
+    Ok(([(header::CONTENT_TYPE, mime)], bytes).into_response())
+}
+
+/// 定位视频的本地封面：多页视频为视频目录下的 poster.jpg，单页视频为分页 mp4 同名的 -poster.jpg
+async fn find_local_cover(video: &video::Model, db: &DatabaseConnection) -> Option<PathBuf> {
+    if video.path.is_empty() {
+        return None;
+    }
+    let candidate = if video.single_page == Some(true) {
+        let page = page::Entity::find()
+            .filter(page::Column::VideoId.eq(video.id))
+            .order_by_asc(page::Column::Pid)
+            .one(db)
+            .await
+            .ok()??;
+        let mp4 = PathBuf::from(page.path?);
+        mp4.parent()?
+            .join(format!("{}-poster.jpg", mp4.file_stem()?.to_string_lossy()))
+    } else {
+        PathBuf::from(&video.path).join("poster.jpg")
+    };
+    // 防御数据库中的异常路径：规范化后确认封面仍位于视频目录内
+    let base = dunce::canonicalize(&video.path).ok()?;
+    let canonical = dunce::canonicalize(candidate).ok()?;
+    canonical.starts_with(base).then_some(canonical)
 }

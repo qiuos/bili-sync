@@ -13,6 +13,11 @@ import type {
 	InsertFavoriteRequest,
 	InsertSubmissionRequest,
 	Notifier,
+	OrganizationExecuteResponse,
+	OrganizationPlanResponse,
+	OrganizationRule,
+	OrganizationRuleRequest,
+	OrganizationRulesResponse,
 	QrcodePollResponse as PollQrcodeResponse,
 	ResetFilteredVideosResponse,
 	ResetFilteredVideoStatusRequest,
@@ -163,6 +168,60 @@ class ApiClient {
 
 	async getVideo(id: number): Promise<ApiResponse<VideoResponse>> {
 		return this.get<VideoResponse>(`/videos/${id}`);
+	}
+
+	// 本地封面是二进制图片而非 ApiResponse 包装，浏览器 img 无法携带认证头，
+	// 因此用 fetch 取回 Blob 由调用方转成 object URL，token 不进入 URL
+	async getVideoCoverBlob(id: number): Promise<Blob> {
+		const response = await fetch(`${this.baseURL}/videos/${id}/cover`, {
+			headers: this.defaultHeaders
+		});
+		if (!response.ok) {
+			throw {
+				message: response.status === 404 ? '本地封面不存在' : '获取本地封面失败',
+				status: response.status
+			} as ApiError;
+		}
+		return response.blob();
+	}
+
+	async getOrganizationRules(): Promise<ApiResponse<OrganizationRulesResponse>> {
+		return this.get<OrganizationRulesResponse>('/organization/rules');
+	}
+
+	async createOrganizationRule(
+		request: OrganizationRuleRequest
+	): Promise<ApiResponse<OrganizationRule>> {
+		return this.post<OrganizationRule>('/organization/rules', request);
+	}
+
+	async updateOrganizationRule(
+		id: number,
+		request: OrganizationRuleRequest
+	): Promise<ApiResponse<OrganizationRule>> {
+		return this.put<OrganizationRule>(`/organization/rules/${id}`, request);
+	}
+
+	async deleteOrganizationRule(id: number): Promise<ApiResponse<boolean>> {
+		return this.request<boolean>(`/organization/rules/${id}`, 'DELETE');
+	}
+
+	async previewOrganizationRule(
+		id: number,
+		videoIds?: number[]
+	): Promise<ApiResponse<OrganizationPlanResponse>> {
+		return this.post<OrganizationPlanResponse>(`/organization/rules/${id}/preview`, {
+			video_ids: videoIds
+		});
+	}
+
+	async executeOrganizationRule(
+		id: number,
+		videoIds?: number[]
+	): Promise<ApiResponse<OrganizationExecuteResponse>> {
+		return this.post<OrganizationExecuteResponse>(`/organization/rules/${id}/execute`, {
+			video_ids: videoIds
+		});
 	}
 
 	async resetVideoStatus(
@@ -332,6 +391,18 @@ const api = {
 	insertCollection: (request: InsertCollectionRequest) => apiClient.insertCollection(request),
 	insertSubmission: (request: InsertSubmissionRequest) => apiClient.insertSubmission(request),
 	getVideoSourcesDetails: () => apiClient.getVideoSourcesDetails(),
+	organization: {
+		listRules: () => apiClient.getOrganizationRules(),
+		createRule: (request: OrganizationRuleRequest) => apiClient.createOrganizationRule(request),
+		updateRule: (id: number, request: OrganizationRuleRequest) =>
+			apiClient.updateOrganizationRule(id, request),
+		deleteRule: (id: number) => apiClient.deleteOrganizationRule(id),
+		previewRule: (id: number, videoIds?: number[]) =>
+			apiClient.previewOrganizationRule(id, videoIds),
+		executeRule: (id: number, videoIds?: number[]) =>
+			apiClient.executeOrganizationRule(id, videoIds)
+	},
+	getVideoCoverBlob: (id: number) => apiClient.getVideoCoverBlob(id),
 	updateVideoSource: (type: string, id: number, request: UpdateVideoSourceRequest) =>
 		apiClient.updateVideoSource(type, id, request),
 	removeVideoSource: (type: string, id: number) => apiClient.removeVideoSource(type, id),

@@ -40,7 +40,7 @@
   - Outputs: `watch::Sender` notifications consumed by `VersionedCache`, which rebuilds `Handlebars` templates, the rate limiter and therefore the `BiliClient` behavior.
 - Main execution path (source files and named symbols):
   1. `init` verifies ffmpeg, calls `setup_database`, then `VersionedConfig::init`. `setup_database` creates the parent directory, runs `migrate_database`, then builds the pooled connection.
-  2. `migrate_database` deliberately opens a **separate default** `Database::connect` for migrations (a pooled connection caused ordering issues) and first checks for the `m20250613_043257_add_config` row in `seaql_migrations`; if absent it bails with `该版本仅支持从 2.6.x 以上的版本升级…` so pre-2.6 databases are never half-migrated. Otherwise `Migrator::up` applies the 14 migrations in `crates/bili_sync_migration/src/lib.rs`.
+  2. `migrate_database` deliberately opens a **separate default** `Database::connect` for migrations (a pooled connection caused ordering issues) and first checks for the `m20250613_043257_add_config` row in `seaql_migrations`; if absent it bails with `该版本仅支持从 2.6.x 以上的版本升级…` so pre-2.6 databases are never half-migrated. Otherwise `Migrator::up` applies the migrations in `crates/bili_sync_migration/src/lib.rs`.
   3. `database_connection` sets `max_connections(50)`, `min_connections(5)`, `acquire_timeout(90s)`, `busy_timeout(90s)`, WAL journal, `synchronous=Normal`, statement logging disabled, and `optimize_on_close(true, None)`.
   4. `VersionedConfig::init` loads the row through `load_db_config`. Missing row → `Config::default()`, log `生成 auth_token：…，可使用该 token 登录 web UI，该信息仅在首次运行时打印`, then persist with `save_db_config`. A row that fails to deserialize bails `解析数据库配置失败： {e}`. The loaded `version` is reset to `0`, because it is only a concurrency token.
   5. Each `VersionedConfig` owns `ArcSwap<Config>` plus a `watch` channel. `update` takes `update_lock`, rejects `old_config.version != new_config.version` with `配置版本不匹配，请刷新页面修改后重新提交`, increments the version, saves to the database **before** swapping the in-memory value, then publishes on the watch channel. `update_credential` does the same without the version check input (it reads the current value first).
@@ -52,6 +52,11 @@
   - `Trigger` is `#[serde(untagged)]`: a JSON number is `Interval(secs)`, a JSON string is `Cron(expr)`; the UI therefore sends a number or a string depending on the schedule mode.
   - `NFOTimeType` is `#[serde(rename_all = "lowercase")]` → `favtime`/`pubtime`; `Config` is stored as one JSON blob, so renaming a field or enum variant breaks existing databases unless a migration rewrites the row.
   - `Config` serializes `notifiers: Option<Arc<Vec<Notifier>>>` and the rest of the struct with snake_case field names (no `rename_all`).
+
+## Organization persistence
+
+- `organization_rule` stores each rule name, type, source and output directories. `organization_output` stores rule ID, video/page identity, output path and optional TV series and episode number; `(rule_id, bvid, cid)` is unique.
+- Deleting a rule removes its output records but leaves generated files on disk. Episode history is consequently lost; a new rule does not adopt those files. See [media-artifacts.md](media-artifacts.md) for output behavior.
 
 ## Constraints and failures
 
@@ -68,7 +73,7 @@
   - `setup_database` failure surfaces as `数据库初始化失败`; permission problems on the config dir surface as `Failed to create config directory…`.
   - A failed `VersionedCache` rebuild only logs; the previous cached value keeps being used.
 - Compatibility / migration behavior:
-  - Migrations in order: `m20240322_000001_create_table`, `m20240505_130850_add_collection`, `m20240709_130914_watch_later`, `m20240724_161008_submission`, `m20250122_062926_add_latest_row_at`, `m20250612_090826_add_enabled`, `m20250613_043257_add_config`, `m20250712_080013_add_video_created_at_index`, `m20250903_094454_add_rule_and_should_download`, `m20251009_123713_add_use_dynamic_api`, `m20260324_055217_add_staff`, `m20260712_123205_add_filter_option`, `m20260821_025000_mark_empty_tags_for_refetch`, `m20260823_000001_add_danmaku_last_synced_at`.
+  - Migrations in order: `m20240322_000001_create_table`, `m20240505_130850_add_collection`, `m20240709_130914_watch_later`, `m20240724_161008_submission`, `m20250122_062926_add_latest_row_at`, `m20250612_090826_add_enabled`, `m20250613_043257_add_config`, `m20250712_080013_add_video_created_at_index`, `m20250903_094454_add_rule_and_should_download`, `m20251009_123713_add_use_dynamic_api`, `m20260324_055217_add_staff`, `m20260712_123205_add_filter_option`, `m20260821_025000_mark_empty_tags_for_refetch`, `m20260823_000001_add_danmaku_last_synced_at`, `m20261106_000001_add_organization`.
   - New `Config` fields must have `#[serde(default)]`/defaulted types so existing rows deserialize.
   - `m20260821_025000_mark_empty_tags_for_refetch` exists because previously stored `tags` could be empty; keep that behavior in mind when adding tag-dependent logic.
 
@@ -86,7 +91,7 @@
 
 ## How to verify
 
-- Startup and migration checks: `cargo run -- --config-dir /tmp/bili-sync-test` against an empty directory, then inspect `data.sqlite` (`sqlite3 data.sqlite 'select version from seaql_migrations order by version;'` should list all 14 entries) and the single `config` row (`select id, length(data) from config;`).
+- Startup and migration checks: `cargo run -- --config-dir /tmp/bili-sync-test` against an empty directory, then inspect `data.sqlite` (`sqlite3 data.sqlite 'select version from seaql_migrations order by version;'` should list the registered migrations) and the single `config` row (`select id, length(data) from config;`).
 - Upgrade guard: copy a database without `m20250613_043257_add_config` into a fresh config dir and confirm the exact bail message instead of a partial migration.
 - Validation checks: `PUT /api/config` with `upper_path` relative, empty `video_name`, or `interval = 30`; each must return the corresponding Chinese message and leave the stored config unchanged.
 - Version check: read the config twice, update once, then replay the first body; the second call must fail with `配置版本不匹配…`.

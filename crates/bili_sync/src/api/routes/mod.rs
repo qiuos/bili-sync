@@ -14,6 +14,7 @@ mod config;
 mod dashboard;
 mod login;
 mod me;
+mod organization;
 mod task;
 mod video_sources;
 mod videos;
@@ -26,6 +27,7 @@ pub fn router() -> Router {
         "/api",
         config::router()
             .merge(me::router())
+            .merge(organization::router())
             .merge(login::router())
             .merge(video_sources::router())
             .merge(videos::router())

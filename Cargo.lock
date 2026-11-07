@@ -380,6 +380,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ua_generator",
+ "unicode-normalization",
  "uuid",
  "validator",
 ]

@@ -8,11 +8,12 @@
 
 ## Sources of truth
 
-- Authoritative layout: `crates/bili_sync/src/workflow.rs` — `download_video_pages` (video/episode-level artifacts) and `download_page` (page-level artifacts). Every artifact name is a `format!` in those two functions; nothing else may invent names.
+- Download layout: `crates/bili_sync/src/workflow.rs` `download_video_pages` and `download_page`.
+- Organization output: `crates/bili_sync/src/organization.rs` plans and writes a separate STRM library from existing download paths; original videos are not moved.
 - Authoritative NFO schema: `crates/bili_sync/src/utils/nfo.rs` (`NFO::{Movie,TVShow,Upper,Episode}`, `ToNFO`, and the snapshot unit test). Do not hand-write XML elsewhere.
 - Authoritative path rendering: `PathSafeTemplate::path_safe_render` in `crates/bili_sync/src/config/item.rs` plus `crates/bili_sync/src/config/handlebar.rs` (`video_name`, `page_name`, `*_default_path` templates).
 - Authoritative danmaku output: `crates/bili_sync/src/bilibili/danmaku/writer.rs` (`DanmakuWriter::write`) and `ass_writer.rs`.
-- Forbidden duplicate sources: hard-coded file-name patterns in the front-end, in the API layer, or in `clear_and_reset_video_status` beyond the directory it deletes; a second NFO writer.
+- Keep download naming in `workflow.rs`, organization naming in `organization.rs`, and NFO serialization in `utils/nfo.rs`.
 
 ## Main paths / change loci
 
@@ -53,6 +54,12 @@
   - `multi_fetch_and_merge` calls `ffmpeg -c copy -strict unofficial -f mp4 -y` (binary from `ARGS.ffmpeg_path`, default `ffmpeg`) to mux separate video and audio streams.
   - `fetch_serial` verifies the received byte count against `Content-Length` (`downloaded bytes mismatch: expected {}, got {}`).
   - `fetch_parallel` probes with `Range: bytes=0-0` GET instead of HEAD for streams (HEAD may 404 while GET works), uses HEAD + `Accept-Ranges` for plain files, falls back to serial, and verifies each chunk (`content length mismatch`, `downloaded bytes mismatch`).
+
+## Organization output
+
+- Rules use separate source and output paths. TV rules group by uploader name, use Season 1 and persist episode numbers by `(bvid, cid)`; new episodes append after the historical maximum. Movie rules require explicit video selection for execution and treat multi-page videos as versions.
+- STRM files reference local source video paths. NFO files use the existing serializer; available artwork, subtitles and ASS files are copied alongside the STRM. Existing destination files are not overwritten. Execution reports missing files, conflicts and write failures.
+- Moving or deleting a source video breaks its STRM. Validation rejects overlapping rule paths. The execute API is temporarily disabled: the current writer cannot guarantee safety against concurrent filesystem changes. Preview remains available. The existing writer requires filesystem hard-link support; no production-safe replacement has been integrated.
 
 ## Constraints and failures
 

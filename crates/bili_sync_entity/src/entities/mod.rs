@@ -5,6 +5,8 @@ pub mod prelude;
 pub mod collection;
 pub mod config;
 pub mod favorite;
+pub mod organization_output;
+pub mod organization_rule;
 pub mod page;
 pub mod submission;
 pub mod video;

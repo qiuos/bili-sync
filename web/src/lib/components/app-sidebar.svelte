@@ -3,6 +3,7 @@
 	import ChartPieIcon from '@lucide/svelte/icons/chart-pie';
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 	import FilePlayIcon from '@lucide/svelte/icons/file-play';
+	import FolderSyncIcon from '@lucide/svelte/icons/folder-sync';
 	import FoldersIcon from '@lucide/svelte/icons/folders';
 	import HeartIcon from '@lucide/svelte/icons/heart';
 	import PaletteIcon from '@lucide/svelte/icons/palette';
@@ -47,6 +48,11 @@
 						title: '视频',
 						icon: FilePlayIcon,
 						href: '/videos'
+					},
+					{
+						title: '媒体整理',
+						icon: FolderSyncIcon,
+						href: '/organization'
 					},
 					{
 						title: '视频源',

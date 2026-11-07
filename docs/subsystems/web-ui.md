@@ -32,6 +32,7 @@
   - `/` dashboard: `getDashboard()` counts plus `subscribeToSysInfo`/`subscribeToTasks`; CPU and memory history arrays; disk usage computed as `(total_disk - available_disk) / total_disk`; triggers `POST /api/task/download` via `triggerDownloadTask`.
   - `/logs`: subscribes to logs and keeps the last 500 entries (`logs.slice(-499)`), auto-scrolls unless the user scrolled up.
   - `/videos`: list with URL-synced filters (page size 20), source/query/status/validation/created-time filters.
+  - `/organization`: create and edit TV or movie rules, preview the plan, select movies and execute; results show item status and counts.
   - `/video/[id]`: detail, per-subtask status editor, reset (optional `force`), clear-and-reset (deletes pages and local directory).
   - `/video-sources`: tabs for favorites/collections/submissions/watch_later; add/update/remove/evaluate/full-sync; new items are created disabled.
   - `/settings`: token authentication bar, config tabs (basic/auth/filter/danmaku/notifiers/advanced), notifier CRUD + test, QR login dialog.
@@ -51,7 +52,8 @@
   5. Reconnection: on `close`, `scheduleReconnect` retries up to `maxReconnectAttempts = 5` with `1000 * 2^n` ms delays; after that it stops silently (`console.log('Max reconnect attempts reached')`).
   6. Filter state lives in `appStateStore` (defaults `validationFilter: 'normal'`, `currentPage: 0`); `ToQuery` maps it to URL parameters (`page`, `query`, `<sourceType>`, `status_filter`, `validation_filter`, `created_from`, `created_to`) and `ToFilterParams` to API parameters, so filtered views are shareable/reloadable.
   7. Status rendering: the API returns `download_status` as five numbers. `getStatusText` renders `7` → 已完成, `0` → 未开始, else 失败N次; `getOverallStatus` prioritizes `!valid` → 失效, `!should_download` → 跳过, all-7 → 完成, any-not-7-not-0 → 失败, else 等待. The editor only allows setting 0 or 7, and resetting page status forces the video's index 4 ("分页下载") to 0 on the server.
-  8. Settings forms: `intervalInput` is parsed on save — a purely numeric string becomes a number (`Trigger::Interval`), anything else a string (`Trigger::Cron`). Notifier dialog fields mirror `Notifier` (telegram/webhook/smtp); SMTP defaults to port 465 and `tls`. The QR dialog polls `GET /api/login/qrcode/poll` every 2 seconds with a 180-second expiry.
+  8. Video cards load downloaded covers through an authenticated fetch and reference-counted object URLs (`video-cover.svelte`, `cover-cache.ts`); missing covers show a placeholder. Organization dialogs use the rule and preview APIs.
+  9. Settings forms: `intervalInput` is parsed on save — a purely numeric string becomes a number (`Trigger::Interval`), anything else a string (`Trigger::Cron`). Notifier dialog fields mirror `Notifier` (telegram/webhook/smtp); SMTP defaults to port 465 and `tls`. The QR dialog polls `GET /api/login/qrcode/poll` every 2 seconds with a 180-second expiry.
 - State ownership, transitions and persistence:
   - The only persisted client state is `localStorage['authToken']`; everything else is in-memory and lost on reload.
   - The socket's `subscribedEvents` set is cleared by `disconnect()` and replayed after reconnect.
@@ -60,7 +62,7 @@
 ## Constraints and failures
 
 - Invariants:
-  - All requests go through `api.ts`; it owns the base URL, token header and error normalization.
+  - JSON requests go through `api.ts`; it owns the base URL, token header and error normalization. Local cover image fetches use the same authentication token via the cover cache.
   - The socket URL must stay on the same origin (`/api/ws`) so the embedded build works behind any reverse proxy; only the protocol follows `location.protocol`.
   - `download_status` is always treated as a five-element array; never as a bitfield in the UI.
   - Task labels must match the backend offsets: video `['视频封面','视频信息','UP 主头像','UP 主信息','分页下载']`, page `['视频封面','视频内容','视频信息','视频弹幕','视频字幕']`.

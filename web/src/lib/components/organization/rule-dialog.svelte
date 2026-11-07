@@ -1,0 +1,182 @@
+<script lang="ts">
+	import { Button } from '$lib/components/ui/button/index.js';
+	import { Input } from '$lib/components/ui/input/index.js';
+	import { Label } from '$lib/components/ui/label/index.js';
+	import * as Select from '$lib/components/ui/select/index.js';
+	import { toast } from 'svelte-sonner';
+	import {
+		Sheet,
+		SheetContent,
+		SheetDescription,
+		SheetFooter,
+		SheetHeader,
+		SheetTitle
+	} from '$lib/components/ui/sheet/index.js';
+	import api from '$lib/api';
+	import type {
+		ApiError,
+		OrganizationRule,
+		OrganizationRuleRequest,
+		OrganizationRuleType
+	} from '$lib/types';
+
+	interface Props {
+		open: boolean;
+		rule: OrganizationRule | null;
+		onSuccess: (() => void) | null;
+	}
+
+	let { open = $bindable(false), rule = null, onSuccess = null }: Props = $props();
+
+	const RULE_TYPE_OPTIONS: { value: OrganizationRuleType; label: string }[] = [
+		{ value: 'tv', label: '电视剧' },
+		{ value: 'movie', label: '电影' }
+	];
+
+	let name = $state('');
+	let ruleType = $state<OrganizationRuleType>('tv');
+	let sourcePath = $state('');
+	let outputPath = $state('');
+	let loading = $state(false);
+
+	$effect(() => {
+		if (open) {
+			name = rule?.name ?? '';
+			ruleType = rule?.rule_type ?? 'tv';
+			sourcePath = rule?.source_path ?? '';
+			outputPath = rule?.output_path ?? '';
+		}
+	});
+
+	async function handleSubmit() {
+		if (!name.trim() || !sourcePath.trim() || !outputPath.trim()) return;
+		loading = true;
+		try {
+			const request: OrganizationRuleRequest = {
+				name: name.trim(),
+				rule_type: ruleType,
+				source_path: sourcePath.trim(),
+				output_path: outputPath.trim()
+			};
+			if (rule) {
+				await api.organization.updateRule(rule.id, request);
+				toast.success('规则已更新', { description: `「${request.name}」已保存` });
+			} else {
+				await api.organization.createRule(request);
+				toast.success('规则已创建', { description: `「${request.name}」已保存` });
+			}
+			open = false;
+			onSuccess?.();
+		} catch (error) {
+			console.error('保存整理规则失败：', error);
+			toast.error(rule ? '更新规则失败' : '创建规则失败', {
+				description: (error as ApiError).message
+			});
+		} finally {
+			loading = false;
+		}
+	}
+</script>
+
+<Sheet bind:open>
+	<SheetContent side="right" class="flex w-full flex-col sm:max-w-md">
+		<SheetHeader class="px-6 pb-2">
+			<SheetTitle class="text-lg">{rule ? '编辑整理规则' : '新建整理规则'}</SheetTitle>
+			<SheetDescription class="text-muted-foreground text-sm">
+				{rule ? `修改规则「${rule.name}」的配置` : '配置一条从源目录到输出媒体库的整理规则'}
+			</SheetDescription>
+		</SheetHeader>
+
+		<div class="flex-1 overflow-y-auto px-6">
+			<div class="space-y-5 py-4">
+				<div class="space-y-2">
+					<Label for="rule-name" class="text-sm font-medium">
+						规则名称 <span class="text-destructive">*</span>
+					</Label>
+					<Input
+						id="rule-name"
+						type="text"
+						placeholder="例如：番剧整理"
+						bind:value={name}
+						maxlength={100}
+						disabled={loading}
+					/>
+				</div>
+
+				<div class="space-y-2">
+					<Label class="text-sm font-medium">整理类型</Label>
+					<Select.Root
+						type="single"
+						value={ruleType}
+						onValueChange={(v) => (ruleType = v as OrganizationRuleType)}
+						disabled={loading}
+					>
+						<Select.Trigger class="w-full">
+							{RULE_TYPE_OPTIONS.find((option) => option.value === ruleType)?.label ?? ruleType}
+						</Select.Trigger>
+						<Select.Content>
+							{#each RULE_TYPE_OPTIONS as option (option.value)}
+								<Select.Item value={option.value} label={option.label} />
+							{/each}
+						</Select.Content>
+					</Select.Root>
+					<p class="text-muted-foreground text-xs">
+						{ruleType === 'tv'
+							? '电视剧：按 UP 主用户名聚合为剧集，每个分P一集'
+							: '电影：不按 UP 主聚合，需要手动选择视频，多P视为同一电影的多个版本'}
+					</p>
+				</div>
+
+				<div class="space-y-2">
+					<Label for="rule-source" class="text-sm font-medium">
+						源目录 <span class="text-destructive">*</span>
+					</Label>
+					<Input
+						id="rule-source"
+						type="text"
+						placeholder="例如：/media/downloads/bilibili"
+						bind:value={sourcePath}
+						disabled={loading}
+						class="font-mono text-sm"
+					/>
+					<p class="text-muted-foreground text-xs">待整理视频所在的下载目录，须为绝对路径。</p>
+				</div>
+
+				<div class="space-y-2">
+					<Label for="rule-output" class="text-sm font-medium">
+						输出目录 <span class="text-destructive">*</span>
+					</Label>
+					<Input
+						id="rule-output"
+						type="text"
+						placeholder="例如：/media/emby/电视剧"
+						bind:value={outputPath}
+						disabled={loading}
+						class="font-mono text-sm"
+					/>
+					<p class="text-muted-foreground text-xs">
+						STRM 媒体库目录，须为绝对路径；不能与任何源目录或其他输出目录相同或互相嵌套。
+					</p>
+				</div>
+			</div>
+		</div>
+
+		<SheetFooter class="bg-background flex gap-2 border-t px-6 pt-4">
+			<Button
+				variant="outline"
+				onclick={() => (open = false)}
+				disabled={loading}
+				class="flex-1 cursor-pointer"
+			>
+				取消
+			</Button>
+			<Button
+				onclick={handleSubmit}
+				disabled={loading || !name.trim() || !sourcePath.trim() || !outputPath.trim()}
+				class="flex-1 cursor-pointer"
+			>
+				{loading ? '保存中...' : '保存'}
+			</Button>
+		</SheetFooter>
+	</SheetContent>
+</Sheet>

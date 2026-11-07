@@ -18,6 +18,7 @@
 	import UserIcon from '@lucide/svelte/icons/user';
 	import { goto } from '$app/navigation';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
+	import VideoCover from '$lib/components/video-cover.svelte';
 
 	// 将 bvid 设置为可选属性，但保留 VideoInfo 的其它所有属性
 	export let video: Omit<VideoInfo, 'bvid'> & { bvid?: string };
@@ -134,6 +135,10 @@
 </script>
 
 <Card class={cardClasses}>
+	{#if mode !== 'page'}
+		<!-- page 模式下 video.id 实为分页 id，与按视频查询的封面接口不符，故不展示封面 -->
+		<VideoCover videoId={video.id} alt={displayTitle} class="-mt-6 rounded-t-xl" />
+	{/if}
 	<CardHeader class="shrink-0 pb-1">
 		<div class="flex min-w-0 items-start justify-between gap-3">
 			<CardTitle

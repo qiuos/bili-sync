@@ -409,6 +409,58 @@ export interface UpdateVideoSourceResponse {
 	ruleDisplay: string;
 }
 
+// 媒体整理相关类型
+export type OrganizationRuleType = 'tv' | 'movie';
+
+export interface OrganizationRule {
+	id: number;
+	name: string;
+	rule_type: OrganizationRuleType;
+	source_path: string;
+	output_path: string;
+}
+
+export interface OrganizationRulesResponse {
+	rules: OrganizationRule[];
+}
+
+export interface OrganizationRuleRequest {
+	name: string;
+	rule_type: OrganizationRuleType;
+	source_path: string;
+	output_path: string;
+}
+
+export type OrganizationItemAction =
+	'create' | 'refresh' | 'exists' | 'conflict' | 'missing' | 'failed';
+
+export interface OrganizationPlanItem {
+	video_id: number;
+	page_id: number;
+	video_name: string;
+	page_name: string;
+	series: string | null;
+	episode: number | null;
+	action: OrganizationItemAction;
+	target: string | null;
+	message: string | null;
+}
+
+export interface OrganizationPlanResponse {
+	items: OrganizationPlanItem[];
+	warnings: string[];
+}
+
+export interface OrganizationExecuteResponse {
+	created: number;
+	refreshed: number;
+	skipped: number;
+	failed: number;
+	extras_created: number;
+	items: OrganizationPlanItem[];
+	warnings: string[];
+}
+
 // 扫码登录相关类型
 export interface QrcodeGenerateResponse {
 	url: string;

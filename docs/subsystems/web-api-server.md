@@ -33,6 +33,8 @@
   - `POST /api/login/qrcode/generate`, `GET /api/login/qrcode/poll?qrcode_key=…`.
   - `GET /api/video-sources`, `GET /api/video-sources/details`, `GET /api/video-sources/{type}/default-path`, `PUT|DELETE /api/video-sources/{type}/{id}`, `POST /api/video-sources/{type}/{id}/evaluate`, `POST /api/video-sources/{type}/{id}/full-sync`, `POST /api/video-sources/favorites|collections|submissions`.
   - `GET /api/videos`, `GET /api/videos/{id}`, `POST /api/videos/{id}/clear-and-reset-status`, `POST /api/videos/{id}/reset-status`, `POST /api/videos/{id}/update-status`, `POST /api/videos/reset-status`, `POST /api/videos/update-status`.
+  - `GET /api/videos/{id}/cover` serves an authenticated local image or a JSON 404 when unavailable.
+  - `GET|POST /api/organization/rules`, `PUT|DELETE /api/organization/rules/{id}`, `POST /api/organization/rules/{id}/preview`, `POST /api/organization/rules/{id}/execute`. Movie preview can list candidates without IDs; movie execution requires explicit video IDs.
   - `GET /api/dashboard`, `POST /api/task/download`, `GET /api/ws` (WebSocket upgrade).
 
 ## Runtime paths and state transitions
@@ -60,8 +62,8 @@
 
 - Invariants:
   - Every `/api` handler must be behind `auth`; adding a route outside `router()` bypasses authentication.
-  - HTTP status must equal `status_code` in the body; clients rely on both.
-  - Endpoints under `/api` must return `ApiResponse`, not bare axum responses, so the front-end error mapping works.
+  - For JSON envelopes, HTTP status must equal `status_code` in the body; clients rely on both.
+  - JSON endpoints under `/api` return `ApiResponse` for front-end error mapping. The authenticated cover endpoint returns image bytes on success and JSON on errors.
   - `download_status` is serialized as a five-element `[u32; 5]` array by `serde_video_download_status`/`serde_page_download_status`; never expose the packed `u32`.
 - Failure modes and recovery:
   - Missing/incorrect token → 401 `auth token does not match`. There is no automatic redirect or token prompt on that response; the UI surfaces it as a toast and the user re-enters the token in `/settings`.

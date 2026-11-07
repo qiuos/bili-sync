@@ -9,6 +9,7 @@ mod database;
 mod downloader;
 mod error;
 mod notifier;
+mod organization;
 mod task;
 mod utils;
 mod workflow;

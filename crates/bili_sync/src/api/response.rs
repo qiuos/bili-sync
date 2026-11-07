@@ -238,3 +238,51 @@ pub struct FullSyncVideoSourceResponse {
     pub removed_count: usize,
     pub warnings: Option<Vec<String>>,
 }
+
+#[derive(Serialize)]
+pub struct OrganizationRuleResponse {
+    pub id: i32,
+    pub name: String,
+    pub rule_type: String,
+    pub source_path: String,
+    pub output_path: String,
+}
+
+#[derive(Serialize)]
+pub struct OrganizationRulesResponse {
+    pub rules: Vec<OrganizationRuleResponse>,
+}
+
+#[derive(Serialize)]
+pub struct OrganizationPlanItem {
+    pub video_id: i32,
+    pub page_id: i32,
+    /// 跨规则去重与冲突判定的稳定标识：bvid + cid
+    pub bvid: String,
+    pub cid: i64,
+    pub video_name: String,
+    pub page_name: String,
+    pub series: Option<String>,
+    pub episode: Option<i32>,
+    /// create / refresh / exists / conflict / missing / failed
+    pub action: String,
+    pub target: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct OrganizationPlanResponse {
+    pub items: Vec<OrganizationPlanItem>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct OrganizationExecuteResponse {
+    pub created: usize,
+    pub refreshed: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub extras_created: usize,
+    pub items: Vec<OrganizationPlanItem>,
+    pub warnings: Vec<String>,
+}

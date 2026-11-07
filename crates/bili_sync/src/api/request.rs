@@ -163,3 +163,36 @@ pub struct PollQrcodeRequest {
 pub struct FullSyncVideoSourceRequest {
     pub delete_local: bool,
 }
+
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum OrganizationRuleType {
+    Tv,
+    Movie,
+}
+
+impl std::fmt::Display for OrganizationRuleType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tv => write!(f, "tv"),
+            Self::Movie => write!(f, "movie"),
+        }
+    }
+}
+
+#[derive(Deserialize, Validate)]
+pub struct OrganizationRuleRequest {
+    #[validate(length(min = 1, max = 100))]
+    pub name: String,
+    pub rule_type: OrganizationRuleType,
+    #[validate(custom(function = "crate::utils::validation::validate_path"))]
+    pub source_path: String,
+    #[validate(custom(function = "crate::utils::validation::validate_path"))]
+    pub output_path: String,
+}
+
+#[derive(Deserialize, Default)]
+pub struct OrganizationActionRequest {
+    /// 电影规则必填：待整理的视频 id 列表
+    pub video_ids: Option<Vec<i32>>,
+}

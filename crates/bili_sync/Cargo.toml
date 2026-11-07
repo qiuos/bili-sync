@@ -61,6 +61,7 @@ tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ua_generator = { workspace = true }
+unicode-normalization = "0.1"
 uuid = { workspace = true }
 validator = { workspace = true }
 
