@@ -4572,7 +4572,7 @@ mod tests {
         .await
         .unwrap();
         // 声明了一个与本次计算不一致的目标（不同集号）
-        let intent_path = output.join("新剧名").join("Season 1").join("新剧名 - S01E07.mp4");
+        let intent_path = output.join("新剧名").join("Season 1").join("新剧名 - S01E08.mp4");
         organization_output::ActiveModel {
             rule_id: Set(rule.id),
             page_id: Set(v1.id),
