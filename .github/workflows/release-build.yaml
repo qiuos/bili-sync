@@ -49,6 +49,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Check latest version
+        id: latest
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          latest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ "$RELEASE_TAG" = "$latest" ] && [ -n "$latest" ]; then
+            printf 'enabled=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'enabled=false\n' >> "$GITHUB_OUTPUT"
+          fi
       - name: Download release artifact
         uses: actions/download-artifact@v8
         with:
@@ -59,7 +71,7 @@ jobs:
         with:
           images: ghcr.io/qiuos/bili-sync-rs
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ steps.latest.outputs.enabled }}
             type=raw,value=${{ inputs.tag || github.ref_name }}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

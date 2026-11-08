@@ -56,14 +56,14 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
       - name: Cache dependencies
         uses: actions/cache@v5
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('docs/bun.lockb') }}
+          key: ${{ runner.os }}-bun-${{ hashFiles('web/bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
       - name: Check Frontend
         run: bun run lint
