@@ -50,7 +50,7 @@
 - Resume behavior: when `page.path` is non-empty it is parsed rather than re-rendered — single-page strips the `.mp4` suffix from the file name, multi-page takes the `Season 1` parent's parent as the base and splits the file name at `" - "`. A malformed stored path is an error (`invalid page path format`), never a silent re-render.
 - `generate_nfo` creates the parent directory before writing, so an NFO can succeed even if the page directory was created moments earlier by a concurrent task.
 - `Downloader` behavior:
-  - `fetch`/`multi_fetch` stream to a temp file and copy it to the destination; `multi_fetch` retries URLs in order, trimming the temp file between attempts. The final copy is not atomic.
+  - `fetch`/`multi_fetch` stream to a temp file, then stage a unique sibling and rename it to the destination. `multi_fetch` retries URLs in order. Page video replacement also updates recorded hard links whose inode matches the previous source, under the organization lock. Unknown targets are not overwritten. Multi-file replacement uses best-effort rollback and is not crash-atomic.
   - `multi_fetch_and_merge` calls `ffmpeg -c copy -strict unofficial -f mp4 -y` (binary from `ARGS.ffmpeg_path`, default `ffmpeg`) to mux separate video and audio streams.
   - `fetch_serial` verifies the received byte count against `Content-Length` (`downloaded bytes mismatch: expected {}, got {}`).
   - `fetch_parallel` probes with `Range: bytes=0-0` GET instead of HEAD for streams (HEAD may 404 while GET works), uses HEAD + `Accept-Ranges` for plain files, falls back to serial, and verifies each chunk (`content length mismatch`, `downloaded bytes mismatch`).
@@ -73,16 +73,16 @@
 - Failure modes and recovery:
   - Partial artifacts are safe: each subtask has its own status bits, so a failed subtitle or danmaku is retried without re-downloading the video.
   - A failed `canonicalize` (`canonicalize video path failed` / `canonicalize base path failed`) aborts that video/page; usually a missing or unreachable directory.
-  - Mismatched byte counts abort the download before the final copy. An interruption or failure during the copy can leave a partial destination file.
+  - Mismatched byte counts abort before replacement; a failed staging copy preserves the destination. A crash during multi-link replacement can leave links on different versions; inspect the paths before retrying.
   - ffmpeg missing or failing is fatal at startup for the binary check and a per-page failure at merge time (`ffmpeg error: {stderr}`).
-  - Deleting files does not change download statuses. The cleanup preview and execution APIs can identify records whose successfully downloaded page files are all missing, subject to conservative source availability checks; cleanup deletes database rows only. `clear-and-reset-status` deletes the video's page rows and attempts to remove the directory at `video.path`, returning a `warning` if removal fails. The stored `video.path` remains unchanged.
+  - Deleting local files does not change download statuses or delete video records. The video redownload endpoint resets statuses and retries without deleting the stored paths or page rows.
 - Compatibility / migration behavior:
-  - Changing `video_name`/`page_name` templates only affects videos that have no stored path yet; already-downloaded rows keep their original paths. Migrating an existing library requires clearing paths (the API has no bulk path rewrite; `clear-and-reset-status` removes pages, not paths).
+  - Changing `video_name`/`page_name` templates only affects videos that have no stored path yet; already-downloaded rows keep their original paths. The API has no bulk path rewrite.
   - `nfo_time_type` (`FavTime`/`PubTime`) changes `<premiered>`/`<year>` for future NFO writes only.
 
 ## Forbidden patterns and common mistakes
 
-- Common mistake: assuming the temp file is atomically renamed into place. The downloader copies it to the configured destination.
+- Common mistake: assuming replacement of multiple existing hard links is a single atomic filesystem transaction. It is not.
 - Forbidden: guessing the artifact suffixes from the Emby docs instead of reading `download_page`; the project uses `-poster.jpg`/`-fanart.jpg`/`-thumb.jpg` (not `poster.jpg` per episode) and `.zh-CN.default.ass` (not `.ass`).
 - Common mistake: expecting a `fanart.jpg` next to each episode of a multi-page video. Only `poster.jpg`/`fanart.jpg` exist at the video level.
 - Common mistake: expecting `upper_path` to be a flat directory. It is `upper_path/<first digit of mid>/<mid>/`, and `Config::check` rejects a non-absolute `upper_path`.

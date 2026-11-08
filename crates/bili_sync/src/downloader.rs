@@ -16,6 +16,122 @@ use tokio_util::io::StreamReader;
 use crate::bilibili::{Client, ErrorForStatusExt};
 use crate::config::{ARGS, ConcurrentDownloadLimit};
 
+async fn install_download(source: &Path, target: &Path) -> Result<()> {
+    install_download_with_links(source, target, &[]).await
+}
+
+pub async fn install_download_with_links(source: &Path, target: &Path, links: &[std::path::PathBuf]) -> Result<()> {
+    let name = target.file_name().context("下载目标缺少文件名")?.to_string_lossy();
+    let temporary = target.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = async {
+        let mut input = fs::File::open(source).await?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await?;
+        tokio::io::copy(&mut input, &mut output).await?;
+        output.flush().await?;
+        drop(output);
+        for link in links {
+            if !crate::organization::same_source_hardlink(target, link) {
+                anyhow::bail!("整理目标「{}」已变化，拒绝替换", link.display());
+            }
+        }
+        let previous = if links.is_empty() {
+            None
+        } else {
+            let backup = target.with_file_name(format!(".{name}.{}.previous", uuid::Uuid::new_v4().simple()));
+            fs::hard_link(target, &backup).await?;
+            Some(backup)
+        };
+        if let Err(error) = fs::rename(&temporary, target).await {
+            if let Some(previous) = &previous {
+                let _ = fs::remove_file(previous).await;
+            }
+            return Err(error.into());
+        }
+        let mut replaced: Vec<std::path::PathBuf> = Vec::new();
+        for link in links {
+            let link_name = link.file_name().context("整理目标缺少文件名")?.to_string_lossy();
+            let staged = link.with_file_name(format!(".{link_name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+            let update: Result<()> = async {
+                fs::hard_link(target, &staged).await?;
+                if !crate::organization::same_source_hardlink(previous.as_ref().unwrap(), link) {
+                    anyhow::bail!("整理目标「{}」已变化，拒绝替换", link.display());
+                }
+                fs::rename(&staged, link).await?;
+                Ok(())
+            }
+            .await;
+            if let Err(error) = update {
+                let _ = fs::remove_file(&staged).await;
+                if let Some(previous) = &previous {
+                    for updated in replaced {
+                        let rollback = updated.with_file_name(format!(".rollback-{}", uuid::Uuid::new_v4()));
+                        if crate::organization::same_source_hardlink(target, &updated)
+                            && fs::hard_link(previous, &rollback).await.is_ok()
+                        {
+                            let _ = fs::rename(&rollback, &updated).await;
+                        }
+                    }
+                    let _ = fs::rename(previous, target).await;
+                }
+                return Err(error);
+            }
+            replaced.push(link.clone());
+        }
+        if let Some(previous) = previous {
+            let _ = fs::remove_file(previous).await;
+        }
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary).await;
+    }
+    result
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_copy_preserves_existing_file_and_success_replaces_it() {
+        let root = std::env::var_os("BILI_SYNC_ORG_TEST_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("bili-download-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).await.unwrap();
+        let target = root.join("video.mp4");
+        let source = root.join("new.mp4");
+        fs::write(&target, b"old").await.unwrap();
+        assert!(install_download(&source, &target).await.is_err());
+        assert_eq!(fs::read(&target).await.unwrap(), b"old");
+        fs::write(&source, b"new").await.unwrap();
+        let link = root.join("organized.mp4");
+        fs::hard_link(&target, &link).await.unwrap();
+        install_download_with_links(&source, &target, &[link.clone()])
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&target).await.unwrap(), b"new");
+        assert_eq!(fs::read(&link).await.unwrap(), b"new");
+        assert!(crate::organization::same_source_hardlink(&target, &link));
+        let foreign = root.join("foreign.mp4");
+        fs::write(&foreign, b"unrelated").await.unwrap();
+        fs::write(&source, b"newer").await.unwrap();
+        assert!(
+            install_download_with_links(&source, &target, &[foreign.clone()])
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(&target).await.unwrap(), b"new");
+        assert_eq!(fs::read(&foreign).await.unwrap(), b"unrelated");
+        fs::remove_dir_all(root).await.unwrap();
+    }
+}
+
 pub struct Downloader {
     client: Client,
 }
@@ -35,7 +151,7 @@ impl Downloader {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        fs::copy(temp_file.file_path(), path).await?;
+        install_download(temp_file.file_path(), path).await?;
         // temp_file 的 drop 需要 std::fs::remove_file
         // 如果交由 rust 自动执行虽然逻辑正确但会略微阻塞异步上下文
         // 尽量主动调用，保证正常执行的情况下文件清除操作由 spawn_blocking 在专门线程中完成
@@ -53,7 +169,7 @@ impl Downloader {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        fs::copy(temp_file.file_path(), path).await?;
+        install_download(temp_file.file_path(), path).await?;
         temp_file.drop_async().await;
         Ok(())
     }
@@ -94,7 +210,7 @@ impl Downloader {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
         }
-        fs::copy(final_temp_file.file_path(), path).await?;
+        install_download(final_temp_file.file_path(), path).await?;
         tokio::join!(
             video_temp_file.drop_async(),
             audio_temp_file.drop_async(),

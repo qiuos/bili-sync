@@ -235,12 +235,12 @@
 		</Card>
 	</div>
 
-	<!-- 最近入库与最新日志：桌面并排（草图约 54:46，入库略宽）、手机堆叠 -->
-	<div class="grid gap-4 lg:grid-cols-12 lg:items-start">
+	<!-- 最近入库与最新日志：桌面并排等高（固定高度、内容内部滚动）、手机堆叠自适应高度 -->
+	<div class="grid gap-4 lg:grid-cols-12">
 		<!-- 最近入库：最近 5 条，倒序；封面/标题/状态/入库时间（PRD R3） -->
-		<div class="lg:col-span-7">
-			<Card class="h-full overflow-hidden">
-				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+		<div class="lg:col-span-7 lg:h-96 min-w-0">
+			<Card class="flex h-full flex-col overflow-hidden">
+				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2 pt-6 shrink-0">
 					<CardTitle class="text-sm font-medium">最近入库</CardTitle>
 					<a
 						href="/videos"
@@ -250,7 +250,7 @@
 						<ChevronRightIcon class="h-4 w-4" />
 					</a>
 				</CardHeader>
-				<CardContent>
+				<CardContent class="min-h-0 flex-1 overflow-y-auto">
 					{#if loading}
 						<div class="text-muted-foreground py-6 text-center text-sm">加载中...</div>
 					{:else if dashboardError}
@@ -304,9 +304,9 @@
 		</div>
 
 		<!-- 最新日志：实时最近 10 条，最新在上（PRD R4） -->
-		<div class="lg:col-span-5">
-			<Card class="h-full">
-				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2">
+		<div class="lg:col-span-5 lg:h-96 min-w-0">
+			<Card class="flex h-full flex-col overflow-hidden">
+				<CardHeader class="flex flex-row items-center justify-between space-y-0 pb-2 pt-6 shrink-0">
 					<CardTitle class="text-sm font-medium">最新日志</CardTitle>
 					<a
 						href="/logs"
@@ -317,7 +317,7 @@
 						<ChevronRightIcon class="h-4 w-4" />
 					</a>
 				</CardHeader>
-				<CardContent>
+				<CardContent class="min-h-0 flex-1 overflow-y-auto">
 					{#if logs.length === 0}
 						<div class="text-muted-foreground py-4 text-center text-sm">暂无日志记录</div>
 					{:else}

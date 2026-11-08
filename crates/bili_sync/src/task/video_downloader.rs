@@ -40,7 +40,7 @@ pub struct TaskStatus {
 struct TaskContext {
     connection: DatabaseConnection,
     bili_client: Arc<BiliClient>,
-    running: tokio::sync::Mutex<()>,
+    running: Arc<tokio::sync::Mutex<()>>,
     status_tx: watch::Sender<TaskStatus>,
     status_rx: watch::Receiver<TaskStatus>,
     video_task_id: tokio::sync::Mutex<Option<uuid::Uuid>>, // 存储当前视频下载任务的 UUID
@@ -67,10 +67,8 @@ impl DownloadTaskManager {
         INSTANCE.get()
     }
 
-    /// 尝试获取下载运行锁（凭据刷新任务也会持有该锁）：任务运行中返回 None。
-    /// 供删除/清理记录等操作与下载流程互斥使用
-    pub fn try_running_lock(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
-        self.cx.running.try_lock().ok()
+    pub fn try_owned_running_lock(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.cx.running.clone().try_lock_owned().ok()
     }
 
     /// 订阅下载任务的状态更新
@@ -108,7 +106,7 @@ impl DownloadTaskManager {
     async fn new(connection: DatabaseConnection, bili_client: Arc<BiliClient>) -> Result<Self> {
         let sched = Arc::new(tokio::sync::Mutex::new(JobScheduler::new().await?));
         let (status_tx, status_rx) = watch::channel(TaskStatus::default());
-        let (running, video_task_id) = (tokio::sync::Mutex::new(()), tokio::sync::Mutex::new(None));
+        let (running, video_task_id) = (Arc::new(tokio::sync::Mutex::new(())), tokio::sync::Mutex::new(None));
         let cx = Arc::new(TaskContext {
             connection,
             bili_client,

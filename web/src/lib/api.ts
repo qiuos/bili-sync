@@ -1,7 +1,6 @@
 import type {
 	ApiError,
 	ApiResponse,
-	ClearAndResetVideoResponse,
 	CollectionsResponse,
 	Config,
 	DashBoardResponse,
@@ -20,6 +19,7 @@ import type {
 	OrganizationRuleRequest,
 	OrganizationRulesResponse,
 	QrcodePollResponse as PollQrcodeResponse,
+	RedownloadResponse,
 	ResetFilteredVideosResponse,
 	ResetFilteredVideoStatusRequest,
 	ResetVideoResponse,
@@ -34,9 +34,6 @@ import type {
 	UpdateVideoStatusResponse,
 	UppersResponse,
 	VideoResponse,
-	VideosCleanupPreviewResponse,
-	VideosCleanupRequest,
-	VideosCleanupResponse,
 	VideoSourcesDetailsResponse,
 	VideoSourcesResponse,
 	VideosRequest,
@@ -236,20 +233,6 @@ class ApiClient {
 		);
 	}
 
-	async deleteVideo(id: number): Promise<ApiResponse<boolean>> {
-		return this.request<boolean>(`/videos/${id}`, 'DELETE');
-	}
-
-	async previewVideosCleanup(): Promise<ApiResponse<VideosCleanupPreviewResponse>> {
-		return this.post<VideosCleanupPreviewResponse>('/videos/cleanup/preview');
-	}
-
-	async executeVideosCleanup(
-		request: VideosCleanupRequest
-	): Promise<ApiResponse<VideosCleanupResponse>> {
-		return this.post<VideosCleanupResponse>('/videos/cleanup', request);
-	}
-
 	async resetVideoStatus(
 		id: number,
 		request: ResetVideoStatusRequest
@@ -257,8 +240,8 @@ class ApiClient {
 		return this.post<ResetVideoResponse>(`/videos/${id}/reset-status`, request);
 	}
 
-	async clearAndResetVideoStatus(id: number): Promise<ApiResponse<ClearAndResetVideoResponse>> {
-		return this.post<ClearAndResetVideoResponse>(`/videos/${id}/clear-and-reset-status`);
+	async redownloadVideo(id: number): Promise<ApiResponse<RedownloadResponse>> {
+		return this.post<RedownloadResponse>(`/videos/${id}/redownload`);
 	}
 
 	async resetFilteredVideoStatus(
@@ -399,13 +382,10 @@ const api = {
 	getVideoSources: () => apiClient.getVideoSources(),
 	getVideos: (params?: VideosRequest) => apiClient.getVideos(params),
 	getVideo: (id: number) => apiClient.getVideo(id),
-	deleteVideo: (id: number) => apiClient.deleteVideo(id),
-	previewVideosCleanup: () => apiClient.previewVideosCleanup(),
-	executeVideosCleanup: (request: VideosCleanupRequest) => apiClient.executeVideosCleanup(request),
 	browseDirectory: (path?: string) => apiClient.browseDirectory(path),
 	resetVideoStatus: (id: number, request: ResetVideoStatusRequest) =>
 		apiClient.resetVideoStatus(id, request),
-	clearAndResetVideoStatus: (id: number) => apiClient.clearAndResetVideoStatus(id),
+	redownloadVideo: (id: number) => apiClient.redownloadVideo(id),
 	resetFilteredVideoStatus: (request: ResetFilteredVideoStatusRequest) =>
 		apiClient.resetFilteredVideoStatus(request),
 	updateVideoStatus: (id: number, request: UpdateVideoStatusRequest) =>

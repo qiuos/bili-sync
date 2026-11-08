@@ -8,10 +8,10 @@
 	import { Label } from '$lib/components/ui/label/index.js';
 	import type { VideoInfo } from '$lib/types';
 	import BanIcon from '@lucide/svelte/icons/ban';
-	import BrushCleaningIcon from '@lucide/svelte/icons/brush-cleaning';
 	import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
 	import CircleXIcon from '@lucide/svelte/icons/circle-x';
 	import ClockIcon from '@lucide/svelte/icons/clock';
+	import CloudDownloadIcon from '@lucide/svelte/icons/cloud-download';
 	import EllipsisIcon from '@lucide/svelte/icons/ellipsis';
 	import FolderIcon from '@lucide/svelte/icons/folder';
 	import HeartIcon from '@lucide/svelte/icons/heart';
@@ -19,7 +19,6 @@
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import SkipForwardIcon from '@lucide/svelte/icons/skip-forward';
 	import SquareArrowOutUpRightIcon from '@lucide/svelte/icons/square-arrow-out-up-right';
-	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import { goto } from '$app/navigation';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
@@ -35,14 +34,10 @@
 	export let taskNames: string[] = []; // 自定义任务名称
 	export let showProgress: boolean = true; // 是否显示进度信息
 	export let onReset: ((forceReset: boolean) => Promise<void>) | null = null; // 自定义重置函数
-	export let onClearAndReset: (() => Promise<void>) | null = null; // 自定义清空重置函数
-	export let onDelete: (() => Promise<void>) | null = null; // 删除记录（仅删数据库记录，保留本地文件）
+	export let onRedownload: (() => Promise<void>) | null = null; // 重新下载：重置状态并立即触发该视频下载
 	export let resetDialogOpen = false; // 导出对话框状态，让父组件可以控制
-	export let clearAndResetDialogOpen = false; // 导出清空重置对话框状态
-	export let deleteDialogOpen = false; // 导出删除确认对话框状态
 	export let resetting = false;
-	export let clearAndResetting = false;
-	export let deleting = false;
+	export let redownloading = false;
 
 	let forceReset = false;
 
@@ -145,15 +140,6 @@
 		resetting = false;
 		resetDialogOpen = false;
 		forceReset = false;
-	}
-
-	async function handleClearAndReset() {
-		clearAndResetting = true;
-		if (onClearAndReset) {
-			await onClearAndReset();
-		}
-		clearAndResetting = false;
-		clearAndResetDialogOpen = false;
 	}
 
 	function handleViewDetail() {
@@ -317,13 +303,18 @@
 								<RotateCcwIcon class="mr-2 h-4 w-4" />
 								重置
 							</DropdownMenu.Item>
-							<DropdownMenu.Item
-								class="cursor-pointer"
-								onclick={() => (clearAndResetDialogOpen = true)}
-							>
-								<BrushCleaningIcon class="mr-2 h-4 w-4" />
-								清空重置
-							</DropdownMenu.Item>
+							{#if onRedownload}
+								<DropdownMenu.Separator />
+								<DropdownMenu.Item
+									class="cursor-pointer"
+									disabled={redownloading}
+									onclick={onRedownload}
+								>
+									<CloudDownloadIcon class="mr-2 h-4 w-4" />
+									{redownloading ? '重下中...' : '重新下载'}
+								</DropdownMenu.Item>
+							{/if}
+							<DropdownMenu.Separator />
 							<DropdownMenu.Item
 								class="cursor-pointer"
 								onclick={() =>
@@ -332,16 +323,6 @@
 								<SquareArrowOutUpRightIcon class="mr-2 h-4 w-4" />
 								在 B 站打开
 							</DropdownMenu.Item>
-							{#if onDelete}
-								<DropdownMenu.Separator />
-								<DropdownMenu.Item
-									class="text-destructive focus:text-destructive cursor-pointer"
-									onclick={() => (deleteDialogOpen = true)}
-								>
-									<Trash2Icon class="mr-2 h-4 w-4" />
-									删除记录
-								</DropdownMenu.Item>
-							{/if}
 						</DropdownMenu.Content>
 					</DropdownMenu.Root>
 				</div>
@@ -395,65 +376,3 @@
 		</AlertDialog.Footer>
 	</AlertDialog.Content>
 </AlertDialog.Root>
-
-<!-- 清空重置确认对话框 -->
-<AlertDialog.Root bind:open={clearAndResetDialogOpen}>
-	<AlertDialog.Content>
-		<AlertDialog.Header>
-			<AlertDialog.Title>清空重置视频</AlertDialog.Title>
-			<AlertDialog.Description>
-				确定要清空重置视频 <strong>"{displayTitle}"</strong> 吗？
-				<br />
-				<br />
-				此操作会：
-				<ul class="mt-2 ml-4 list-disc space-y-1">
-					<li>将视频状态重置为未开始</li>
-					<li>删除所有分页信息</li>
-					<li class="text-destructive font-medium">删除视频对应的文件夹</li>
-				</ul>
-				<br />
-				该功能可在多页视频变更后手动触发全量更新，执行后<span class="text-destructive font-medium"
-					>无法撤销</span
-				>。
-			</AlertDialog.Description>
-		</AlertDialog.Header>
-
-		<AlertDialog.Footer>
-			<AlertDialog.Cancel>取消</AlertDialog.Cancel>
-			<AlertDialog.Action
-				onclick={handleClearAndReset}
-				disabled={clearAndResetting}
-				class="bg-destructive hover:bg-destructive/90"
-			>
-				{clearAndResetting ? '清空重置中...' : '确认清空重置'}
-			</AlertDialog.Action>
-		</AlertDialog.Footer>
-	</AlertDialog.Content>
-</AlertDialog.Root>
-
-<!-- 删除记录确认对话框：仅删除数据库记录，本地文件保留 -->
-{#if onDelete}
-	<AlertDialog.Root bind:open={deleteDialogOpen}>
-		<AlertDialog.Content>
-			<AlertDialog.Header>
-				<AlertDialog.Title>删除视频记录</AlertDialog.Title>
-				<AlertDialog.Description>
-					确定要删除 <strong>"{displayTitle}"</strong> 的视频记录吗？
-					仅删除数据库中的视频及分P记录，<span
-						class="font-medium text-emerald-700 dark:text-emerald-400">本地视频文件全部保留</span
-					>；删除后重新添加视频源或重新扫描，即可再次发现并下载该视频。
-				</AlertDialog.Description>
-			</AlertDialog.Header>
-			<AlertDialog.Footer>
-				<AlertDialog.Cancel disabled={deleting}>取消</AlertDialog.Cancel>
-				<AlertDialog.Action
-					onclick={onDelete}
-					disabled={deleting}
-					class="bg-destructive hover:bg-destructive/90"
-				>
-					{deleting ? '删除中...' : '确认删除'}
-				</AlertDialog.Action>
-			</AlertDialog.Footer>
-		</AlertDialog.Content>
-	</AlertDialog.Root>
-{/if}

@@ -35,12 +35,6 @@ pub struct ResetVideoResponse {
 }
 
 #[derive(Serialize)]
-pub struct ClearAndResetVideoStatusResponse {
-    pub warning: Option<String>,
-    pub video: VideoInfo,
-}
-
-#[derive(Serialize)]
 pub struct ResetFilteredVideosResponse {
     pub resetted: bool,
     pub resetted_videos_count: usize,
@@ -306,21 +300,8 @@ pub struct DirectoryBrowseResponse {
     pub entries: Vec<DirectoryEntry>,
 }
 
+/// 强制重新下载请求已受理。
 #[derive(Serialize)]
-pub struct VideosCleanupPreviewResponse {
-    /// B 站失效候选视频 id，确认后原样回传给执行接口
-    pub invalid_ids: Vec<i32>,
-    /// 已下载完成且全部分 P 文件均不存在的候选视频 id，确认后原样回传给执行接口
-    pub missing_ids: Vec<i32>,
-    /// 因无法确认磁盘确实可用（未挂载、源目录不可访问或证据不足）而被整源跳过的来源目录；
-    /// 这些来源下的缺失候选一律保留，不进入 missing_ids
-    pub skipped_source_paths: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct VideosCleanupResponse {
-    pub deleted_videos_count: u64,
-    pub deleted_pages_count: u64,
-    /// 重新核验后不再匹配而被跳过的候选数量
-    pub skipped_count: usize,
+pub struct RedownloadVideoResponse {
+    pub started: bool,
 }

@@ -276,13 +276,33 @@ pub async fn download_unprocessed_videos(
     let mut download_notify_info = DownloadNotifyInfo::new(video_source.display_name().into());
     while let Some(models) = stream.next().await {
         download_notify_info.record(&models, danmaku_update_video_ids);
+        let ids: Vec<i32> = models
+            .iter()
+            .filter_map(|model| model.id.try_as_ref().copied())
+            .collect();
         update_videos_model(models, connection).await?;
+        for id in ids {
+            organize_completed_video(id, connection).await;
+        }
     }
     if let Some(e) = risk_control_related_error {
         bail!(e);
     }
     video_source.log_download_video_end();
     Ok(download_notify_info)
+}
+
+pub async fn organize_completed_video(id: i32, connection: &DatabaseConnection) {
+    match video::Entity::find_by_id(id).one(connection).await {
+        Ok(Some(video)) => {
+            let status: [u32; 5] = VideoStatus::from(video.download_status).into();
+            if status.iter().all(|value| *value == STATUS_OK) {
+                crate::organization::auto_organize_video(&video, connection).await;
+            }
+        }
+        Ok(None) => error!("自动整理失败：视频记录 {id} 不存在"),
+        Err(error) => error!("自动整理失败：读取视频记录 {id} 出错：{error:#}"),
+    }
 }
 
 async fn prepare_danmaku_updates(
@@ -758,42 +778,52 @@ pub async fn fetch_page_video(
         .get_page_analyzer(page_info)
         .await?
         .best_stream(cx.filter_option)?;
-    match streams {
-        BestStream::Mixed(mix_stream) => {
-            cx.downloader
-                .multi_fetch(
-                    &mix_stream.urls(cx.config.cdn_sorting),
-                    page_path,
-                    &cx.config.concurrent_limit.download,
-                )
-                .await?
+    let staged = page_path.with_file_name(format!(".redownload-{}.mp4", uuid::Uuid::new_v4()));
+    let download_result: Result<()> = async {
+        match streams {
+            BestStream::Mixed(mix_stream) => {
+                cx.downloader
+                    .multi_fetch(
+                        &mix_stream.urls(cx.config.cdn_sorting),
+                        &staged,
+                        &cx.config.concurrent_limit.download,
+                    )
+                    .await?
+            }
+            BestStream::VideoAudio {
+                video: video_stream,
+                audio: None,
+            } => {
+                cx.downloader
+                    .multi_fetch(
+                        &video_stream.urls(cx.config.cdn_sorting),
+                        &staged,
+                        &cx.config.concurrent_limit.download,
+                    )
+                    .await?
+            }
+            BestStream::VideoAudio {
+                video: video_stream,
+                audio: Some(audio_stream),
+            } => {
+                cx.downloader
+                    .multi_fetch_and_merge(
+                        &video_stream.urls(cx.config.cdn_sorting),
+                        &audio_stream.urls(cx.config.cdn_sorting),
+                        &staged,
+                        &cx.config.concurrent_limit.download,
+                    )
+                    .await?
+            }
         }
-        BestStream::VideoAudio {
-            video: video_stream,
-            audio: None,
-        } => {
-            cx.downloader
-                .multi_fetch(
-                    &video_stream.urls(cx.config.cdn_sorting),
-                    page_path,
-                    &cx.config.concurrent_limit.download,
-                )
-                .await?
-        }
-        BestStream::VideoAudio {
-            video: video_stream,
-            audio: Some(audio_stream),
-        } => {
-            cx.downloader
-                .multi_fetch_and_merge(
-                    &video_stream.urls(cx.config.cdn_sorting),
-                    &audio_stream.urls(cx.config.cdn_sorting),
-                    page_path,
-                    &cx.config.concurrent_limit.download,
-                )
-                .await?
-        }
+        let _organization_guard = crate::organization::execution_lock().lock().await;
+        let links = crate::organization::verified_download_links(cx.connection, page_path).await?;
+        crate::downloader::install_download_with_links(&staged, page_path, &links).await?;
+        Ok(())
     }
+    .await;
+    let _ = fs::remove_file(&staged).await;
+    download_result?;
     Ok(ExecutionStatus::Succeeded)
 }
 

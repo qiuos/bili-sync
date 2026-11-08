@@ -6,6 +6,7 @@ pub mod format_arg;
 pub mod model;
 pub mod nfo;
 pub mod notify;
+pub mod redownload;
 pub mod rule;
 pub mod signal;
 pub mod status;

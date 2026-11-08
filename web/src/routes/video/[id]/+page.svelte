@@ -6,7 +6,6 @@
 	import api from '$lib/api';
 	import SquareArrowOutUpRightIcon from '@lucide/svelte/icons/square-arrow-out-up-right';
 	import type { ApiError, VideoResponse, UpdateVideoStatusRequest } from '$lib/types';
-	import BrushCleaningIcon from '@lucide/svelte/icons/brush-cleaning';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import SquarePenIcon from '@lucide/svelte/icons/square-pen';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
@@ -20,8 +19,7 @@
 	let error: string | null = null;
 	let resetDialogOpen = false;
 	let resetting = false;
-	let clearAndResetDialogOpen = false;
-	let clearAndResetting = false;
+
 	let statusEditorOpen = false;
 	let statusEditorLoading = false;
 
@@ -114,32 +112,6 @@
 			});
 		}
 	}
-
-	async function handleClearAndReset() {
-		if (!videoData) return;
-		try {
-			const result = await api.clearAndResetVideoStatus(videoData.video.id);
-			const data = result.data;
-			videoData = {
-				video: data.video,
-				pages: []
-			};
-			if (data.warning) {
-				toast.warning('清空重置成功', {
-					description: data.warning
-				});
-			} else {
-				toast.success('清空重置成功', {
-					description: `视频「${data.video.name}」已清空重置`
-				});
-			}
-		} catch (error) {
-			console.error('清空重置失败：', error);
-			toast.error('清空重置失败', {
-				description: (error as ApiError).message
-			});
-		}
-	}
 </script>
 
 <svelte:head>
@@ -183,20 +155,10 @@
 					variant="outline"
 					class="shrink-0 cursor-pointer "
 					onclick={() => (resetDialogOpen = true)}
-					disabled={resetting || clearAndResetting}
+					disabled={resetting}
 				>
 					<RotateCcwIcon class="mr-2 h-4 w-4 {resetting ? 'animate-spin' : ''}" />
 					重置
-				</Button>
-				<Button
-					size="sm"
-					variant="outline"
-					class="shrink-0 cursor-pointer "
-					onclick={() => (clearAndResetDialogOpen = true)}
-					disabled={resetting || clearAndResetting}
-				>
-					<BrushCleaningIcon class="mr-2 h-4 w-4 {clearAndResetting ? 'animate-spin' : ''}" />
-					清空重置
 				</Button>
 				<Button
 					size="sm"
@@ -220,10 +182,7 @@
 				taskNames={['视频封面', '视频信息', 'UP 主头像', 'UP 主信息', '分页下载']}
 				bind:resetDialogOpen
 				bind:resetting
-				bind:clearAndResetDialogOpen
-				bind:clearAndResetting
 				onReset={handleReset}
-				onClearAndReset={handleClearAndReset}
 			/>
 		</div>
 	</section>

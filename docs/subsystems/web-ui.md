@@ -31,9 +31,9 @@
 - Routes present:
   - `/` dashboard: `getDashboard()` returns the 5 most-recently-added videos (`recent_videos`, ordered by `created_at`/`id` desc) shown as compact cards with `created_at` rendered as 月-日 时:分 in the browser's local timezone (the SQLite value is a naive UTC string parsed with an appended `Z`); shares `subscribeToSysInfo`/`subscribeToTasks`/`subscribeToLogs`. No history charts for CPU/memory (tokens only); the logs card keeps the last 10 lines newest-first via `pushLog` in `$lib/dashboard-data.ts`; layout stacks on mobile and puts 最近入库/最新日志 side by side from `lg`; triggers `POST /api/task/download` via `triggerDownloadTask`.
   - `/logs`: subscribes to logs and keeps the last 500 entries (`logs.slice(-499)`), auto-scrolls unless the user scrolled up.
-  - `/videos`: list with URL-synced filters (page size 20), source/query/status/validation/created-time filters, record deletion and confirmed cleanup preview. Covers and titles open details; a cover-corner icon displays status.
+  - `/videos`: list with URL-synced filters (page size 20), source/query/status/validation/created-time filters, single-video redownload; video deletion and cleanup are not exposed. Covers and titles open details; a cover-corner icon displays status.
   - `/organization`: create, edit and copy TV or movie rules; browse server directories or enter paths (the directory picker invalidates stale listings using a `requestSeq` token); preview the plan and select movies, or run a rule directly from the list. Direct movie execution previews candidates and submits executable video IDs; results show counts and warnings.
-  - `/video/[id]`: detail, per-subtask status editor, reset (optional `force`), clear-and-reset (deletes pages and local directory).
+  - `/video/[id]`: detail, per-subtask status editor, reset (optional `force`), without the destructive clear-and-reset action.
   - `/video-sources`: tabs for favorites/collections/submissions/watch_later; add/update/remove/evaluate/full-sync; new items are created disabled.
   - `/settings`: token authentication bar, config tabs (basic/auth/filter/danmaku/notifiers/advanced), notifier CRUD + test, QR login dialog.
   - `/me/favorites`, `/me/collections`, `/me/uppers`: followed/subscribed lists, with 1-based `page_num` for collections and uppers.
@@ -49,7 +49,7 @@
   2. `setAuthToken` stores the token and header; `clearAuthToken` deletes both and calls `wsManager.disconnect()`. Authentication is entered in `/settings` (the "前端认证状态" bar), which then reloads the config to prove the token works.
   3. `WebSocketManager` is a singleton. `connect()` builds `${ws|wss}://${location.host}/api/ws` and passes the token as the subprotocol: `btoa(token)` with `+`→`-`, `/`→`_`, padding stripped (matching the server's `BASE64_URL_SAFE_NO_PAD`). On open it re-subscribes every event in `subscribedEvents`.
   4. Subscription is reference-counted by callback sets: the first subscriber for an event sends `{"subscribe": "<event>"}`, the last unsubscriber sends `{"unsubscribe": "<event>"}`. Incoming frames are parsed as `{ logs?, tasks?, sysInfo? }` and fanned out to the matching callback set; a parse failure shows a toast.
-  5. Reconnection: on `close`, `scheduleReconnect` retries up to `maxReconnectAttempts = 5` with `1000 * 2^n` ms delays; after that it stops silently (`console.log('Max reconnect attempts reached')`).
+  5. Reconnection: on `close`, `scheduleReconnect` retries indefinitely with exponential delays capped at 30 seconds; an explicit `disconnect()` stops retries and clears subscriptions.
   6. Filter state lives in `appStateStore` (defaults `validationFilter: 'normal'`, `currentPage: 0`); `ToQuery` maps it to URL parameters (`page`, `query`, `<sourceType>`, `status_filter`, `validation_filter`, `created_from`, `created_to`) and `ToFilterParams` to API parameters, so filtered views are shareable/reloadable.
   7. Status rendering: the API returns `download_status` as five numbers. `getStatusText` renders `7` → 已完成, `0` → 未开始, else 失败N次; `getOverallStatus` prioritizes `!valid` → 失效, `!should_download` → 跳过, all-7 → 完成, any-not-7-not-0 → 失败, else 等待. The editor only allows setting 0 or 7, and resetting page status forces the video's index 4 ("分页下载") to 0 on the server.
   8. Video cards load downloaded covers through an authenticated fetch and reference-counted object URLs (`video-cover.svelte`, `cover-cache.ts`); missing covers show a placeholder. Organization dialogs use the rule and preview APIs.
@@ -68,9 +68,8 @@
   - Task labels must match the backend offsets: video `['视频封面','视频信息','UP 主头像','UP 主信息','分页下载']`, page `['视频封面','视频内容','视频信息','视频弹幕','视频字幕']`.
 - Failure modes and recovery:
   - 401 from any call surfaces as `{message: 'auth token does not match', status: 401}`; the user re-enters the token in `/settings`. There is no global interceptor — each page shows a toast.
-  - A lost WebSocket degrades to at most 5 exponential retries; afterwards log/task/system-info panels stop updating until reload.
+  - A lost WebSocket degrades to exponential retries with a 30-second delay cap until the connection recovers.
   - A failed save (validation or version mismatch) shows the server `message` and keeps the form values; the user must reload to pick up `version` changes.
-  - `clear-and-reset-status` may return a `warning` string when the local directory cannot be removed; the operation still succeeds in the database.
 - Compatibility / migration behavior:
   - The client must be rebuilt and re-embedded for any API change; `web/build` is baked into the binary at compile time (the `build-frontend` recipe in `Justfile` runs `bun run build`).
   - `web/src/lib/types.ts` declares `SysInfo.used_disk`, which the server does not send; the dashboard computes disk usage from `total_disk`/`available_disk`, so the extra field is unused. Do not rely on it.

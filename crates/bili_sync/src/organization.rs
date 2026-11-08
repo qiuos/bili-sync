@@ -61,7 +61,7 @@ fn path_occupied(path: &Path) -> bool {
 /// 返回 false——fail closed）。符号链接一律视为不同。仅用于同源硬链接的保守识别，
 /// 不作为目录或元数据归属的证明。
 #[cfg(unix)]
-fn same_source_hardlink(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_source_hardlink(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     if a.symlink_metadata().is_ok_and(|meta| meta.file_type().is_symlink())
         || b.symlink_metadata().is_ok_and(|meta| meta.file_type().is_symlink())
@@ -78,8 +78,42 @@ fn same_source_hardlink(a: &Path, b: &Path) -> bool {
 
 /// 非 Unix 平台无法比较 (dev, ino)，一律按不同文件处理（保守不刷新）
 #[cfg(not(unix))]
-fn same_source_hardlink(_a: &Path, _b: &Path) -> bool {
+pub(crate) fn same_source_hardlink(_a: &Path, _b: &Path) -> bool {
     false
+}
+
+/// 仅返回当前确实与源文件同 inode 的整理链接；未知文件绝不能作为覆盖目标。
+pub async fn verified_download_links(db: &DatabaseConnection, source: &Path) -> Result<Vec<PathBuf>> {
+    let Some(page) = page::Entity::find()
+        .filter(page::Column::Path.eq(source.to_string_lossy().to_string()))
+        .one(db)
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(video) = video::Entity::find_by_id(page.video_id).one(db).await? else {
+        return Ok(Vec::new());
+    };
+    let rows = organization_output::Entity::find()
+        .filter(organization_output::Column::Bvid.eq(video.bvid))
+        .filter(organization_output::Column::Cid.eq(page.cid))
+        .all(db)
+        .await?;
+    let mut links = Vec::new();
+    for row in rows {
+        let Some(rule) = organization_rule::Entity::find_by_id(row.rule_id).one(db).await? else {
+            continue;
+        };
+        let root = revalidate_dir(&rule.output_path, "输出目录")?;
+        let target = PathBuf::from(row.path);
+        ensure_path_within(&root, &target)?;
+        if same_source_hardlink(source, &target) {
+            links.push(target);
+        } else if path_occupied(source) && path_occupied(&target) {
+            bail!("整理目标「{}」与源文件不再同源，拒绝覆盖并保留原文件", target.display());
+        }
+    }
+    Ok(links)
 }
 
 /// 校验 target 位于 root 之内，且从 root 到 target 的路径上不存在任何符号链接
@@ -379,12 +413,112 @@ pub async fn execute_rule(
         !paths_overlap(&output, &source),
         "输出目录与源目录相同或存在嵌套，拒绝执行"
     );
-    let plan = match rule.rule_type.as_str() {
+    let mut plan = match rule.rule_type.as_str() {
         "tv" => plan_tv(&rule, db, &source).await?,
         "movie" => plan_movie(&rule, db, &source, video_ids, true).await?,
         other => bail!("未知的规则类型：{other}"),
     };
+    if rule.rule_type == "tv"
+        && let Some(ids) = video_ids
+    {
+        // Keep other reorganisation entries as conflicts solely for the directory ownership guard.
+        plan.items.retain(|item| ids.contains(&item.video_id) || item.reorg);
+        for item in &mut plan.items {
+            if !ids.contains(&item.video_id) {
+                item.action = ItemAction::Conflict("该视频未被选中，保留重整保护".into());
+            }
+        }
+    }
     execute_plan(&rule, plan, db, &output).await
+}
+
+/// 下载或重下成功后自动整理：将该视频的源目录与现有规则的 source_path 比较，
+/// 匹配规则后只整理该视频；电视规则仍按整个来源计算稳定集号。
+/// 全程复用 execute_rule 的归属检查与持久记录机制，绝不放宽；失败仅记日志，不影响下载状态。
+/// 视频路径（规范化后）不在任何规则源目录内时不做任何事
+pub async fn auto_organize_video(video: &video::Model, db: &DatabaseConnection) {
+    let Ok(video_dir) = std::fs::canonicalize(&video.path) else {
+        debug!(
+            "视频「{}」({}) 路径不存在或无法访问，跳过自动整理",
+            video.name, video.bvid
+        );
+        return;
+    };
+    let rules = match organization_rule::Entity::find().all(db).await {
+        Ok(rules) => rules,
+        Err(error) => {
+            error!(
+                "自动整理视频「{}」({}) 失败：读取整理规则出错：{error:#}",
+                video.name, video.bvid
+            );
+            return;
+        }
+    };
+    for rule in rules {
+        if !is_video_in_rule_source(&video_dir, &rule.source_path) {
+            continue;
+        }
+        info!(
+            "视频「{}」({}) 命中整理规则「{}」（源目录 {} → 输出目录 {}），开始自动整理..",
+            video.name, video.bvid, rule.name, rule.source_path, rule.output_path
+        );
+        let report = execute_rule(&rule, db, Some(&[video.id])).await;
+        match report {
+            Ok(report) => {
+                info!(
+                    "整理规则「{}」执行完成：视频「{}」({}) 目标目录 {}；新增 {}，刷新 {}，跳过 {}，失败 {}",
+                    rule.name,
+                    video.name,
+                    video.bvid,
+                    rule.output_path,
+                    report.created,
+                    report.refreshed,
+                    report.skipped,
+                    report.failed
+                );
+                for item in &report.items {
+                    let target_hint = item
+                        .target
+                        .as_ref()
+                        .map(|t| format!("目标 {}", t.display()))
+                        .unwrap_or_default();
+                    match &item.action {
+                        ItemAction::Failed(message) => error!(
+                            "整理规则「{}」处理视频「{}」({}) 失败{}：{message}",
+                            rule.name, item.video_name, item.bvid, target_hint
+                        ),
+                        ItemAction::Conflict(message) | ItemAction::Missing(message) => error!(
+                            "整理规则「{}」处理视频「{}」({}) 失败{}：{message}",
+                            rule.name, item.video_name, item.bvid, target_hint
+                        ),
+                        _ => {
+                            if let Some(message) = &item.message {
+                                warn!(
+                                    "整理规则「{}」处理视频「{}」({}){}：{message}",
+                                    rule.name, item.video_name, item.bvid, target_hint
+                                );
+                            }
+                        }
+                    }
+                }
+                if !report.warnings.is_empty() {
+                    error!("整理规则「{}」执行警告：{}", rule.name, report.warnings.join("；"));
+                }
+            }
+            Err(e) => error!(
+                "整理规则「{}」（源 {} → 输出 {}）自动整理视频「{}」({}) 失败：{:#}",
+                rule.name, rule.source_path, rule.output_path, video.name, video.bvid, e
+            ),
+        }
+    }
+}
+
+/// 视频目录是否位于规则源目录内：源目录需可访问；路径相同或为子路径均算命中
+fn is_video_in_rule_source(video_dir: &Path, rule_source: &str) -> bool {
+    let Ok(rule_source_real) = std::fs::canonicalize(rule_source) else {
+        return false;
+    };
+    video_dir == rule_source_real || video_dir.starts_with(&rule_source_real)
 }
 
 /// 加载已下载且位于源目录内的视频与其分页，按 bvid 去重（保留数据库中最早一条）。
@@ -2099,6 +2233,54 @@ mod tests {
         touch(&mp4);
         let page = insert_page(db, video.id, 0, Some(&mp4)).await;
         (video, page, mp4)
+    }
+
+    #[tokio::test]
+    async fn auto_organize_targets_only_completed_video_and_preserves_download_status_on_error() {
+        let root = temp_root("auto-organization");
+        let source = root.join("source");
+        let output = root.join("output");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let db = test_db(&root).await;
+        let (first, _, _) = single_video(&db, "BVauto1", "UP", &source.join("first"), day_of(1)).await;
+        let (second, _, _) = single_video(&db, "BVauto2", "UP", &source.join("second"), day_of(2)).await;
+        organization_rule::ActiveModel {
+            name: Set("自动剧库".into()),
+            rule_type: Set("tv".into()),
+            source_path: Set(source.to_string_lossy().to_string()),
+            output_path: Set(output.to_string_lossy().to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        auto_organize_video(&first, &db).await;
+        let rows = organization_output::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bvid, first.bvid);
+        assert!(!rows.iter().any(|row| row.bvid == second.bvid));
+        assert!(Path::new(&rows[0].path).is_file());
+        let original = PathBuf::from(first.path.clone()).join("EP.mp4");
+        let links = verified_download_links(&db, &original).await.unwrap();
+        assert_eq!(links, vec![PathBuf::from(&rows[0].path)]);
+        std::fs::remove_file(&rows[0].path).unwrap();
+        std::fs::write(&rows[0].path, b"foreign").unwrap();
+        assert!(verified_download_links(&db, &original).await.is_err());
+        assert_eq!(std::fs::read(&rows[0].path).unwrap(), b"foreign");
+        // 输出目录不可用时整理失败，视频下载状态不能被改变。
+        std::fs::remove_dir_all(&output).unwrap();
+        std::fs::write(&output, b"not a directory").unwrap();
+        auto_organize_video(&second, &db).await;
+        assert_eq!(
+            video::Entity::find_by_id(second.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .download_status,
+            second.download_status
+        );
     }
 
     #[test]

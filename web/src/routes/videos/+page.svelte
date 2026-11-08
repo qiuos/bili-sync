@@ -5,7 +5,6 @@
 	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import SquarePenIcon from '@lucide/svelte/icons/square-pen';
-	import BrushCleaningIcon from '@lucide/svelte/icons/brush-cleaning';
 	import api from '$lib/api';
 	import { Checkbox } from '$lib/components/ui/checkbox/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
@@ -39,7 +38,6 @@
 	} from '$lib/stores/filter';
 	import { toast } from 'svelte-sonner';
 	import DropdownFilter, { type Filter } from '$lib/components/dropdown-filter.svelte';
-	import CleanupDialog from '$lib/components/cleanup-dialog.svelte';
 	import SearchBar from '$lib/components/search-bar.svelte';
 	import FilteredStatusEditor from '$lib/components/filtered-status-editor.svelte';
 	import StatusFilter from '$lib/components/status-filter.svelte';
@@ -57,8 +55,7 @@
 	let resetAllDialogOpen = false;
 	let resettingAll = false;
 
-	let cleanupDialogOpen = false;
-	let deletingVideoId: number | null = null;
+	let redownloadingVideoId: number | null = null;
 
 	let forceReset = false;
 
@@ -182,20 +179,26 @@
 		loadVideos(query, pageNum, videoSource, statusFilter, validationFilter, createdFrom, createdTo);
 	}
 
-	// 删除单条视频记录：仅删除数据库记录，本地文件保留；重新扫描后可重新发现
-	async function handleDeleteVideo(id: number) {
-		deletingVideoId = id;
+	// 单视频重下：立即触发，重置视频及分P状态后调度下载（R2）
+	async function handleRedownload(id: number) {
+		if (redownloadingVideoId !== null) {
+			toast.info('正在提交重新下载，请稍候');
+			return;
+		}
+		redownloadingVideoId = id;
 		try {
-			await api.deleteVideo(id);
-			toast.success('记录已删除', {
-				description: '仅删除了数据库记录，本地文件已保留；重新扫描后可重新发现该视频'
+			await api.redownloadVideo(id);
+			toast.success('已触发重新下载', {
+				description: '任务将立即开始执行，成功后替换原文件，失败时保留原文件'
 			});
 			await reloadVideos();
 		} catch (error) {
-			console.error('删除视频记录失败：', error);
-			toast.error('删除视频记录失败', { description: (error as ApiError).message });
+			console.error('触发重新下载失败：', error);
+			toast.error('触发重新下载失败', {
+				description: (error as ApiError).message
+			});
 		} finally {
-			deletingVideoId = null;
+			redownloadingVideoId = null;
 		}
 	}
 
@@ -216,28 +219,6 @@
 		} catch (error) {
 			console.error('重置失败：', error);
 			toast.error('重置失败', {
-				description: (error as ApiError).message
-			});
-		}
-	}
-
-	async function handleClearAndResetVideo(id: number) {
-		try {
-			const result = await api.clearAndResetVideoStatus(id);
-			const data = result.data;
-			if (data.warning) {
-				toast.warning('清空重置成功', {
-					description: data.warning
-				});
-			} else {
-				toast.success('清空重置成功', {
-					description: `视频「${data.video.name}」已清空重置`
-				});
-			}
-			await reloadVideos();
-		} catch (error) {
-			console.error('清空重置失败：', error);
-			toast.error('清空重置失败', {
 				description: (error as ApiError).message
 			});
 		}
@@ -537,16 +518,6 @@
 				<RotateCcwIcon class="mr-1.5 h-3 w-3 {resettingAll ? 'animate-spin' : ''}" />
 				{hasFilters ? '重置筛选' : '重置全部'}
 			</Button>
-			<Button
-				size="sm"
-				variant="outline"
-				class="hover:bg-accent hover:text-accent-foreground h-8 cursor-pointer text-xs font-medium"
-				onclick={() => (cleanupDialogOpen = true)}
-				disabled={loading}
-			>
-				<BrushCleaningIcon class="mr-1.5 h-3 w-3" />
-				清理失效记录
-			</Button>
 		</div>
 	</div>
 {/if}
@@ -566,13 +537,10 @@
 				onReset={async (forceReset: boolean) => {
 					await handleResetVideo(video.id, forceReset);
 				}}
-				onClearAndReset={async () => {
-					await handleClearAndResetVideo(video.id);
+				onRedownload={async () => {
+					await handleRedownload(video.id);
 				}}
-				onDelete={async () => {
-					await handleDeleteVideo(video.id);
-				}}
-				deleting={deletingVideoId === video.id}
+				redownloading={redownloadingVideoId === video.id}
 			/>
 		{/each}
 	</div>
@@ -658,5 +626,3 @@
 	filterDescriptionParts={filterDescriptionParts || []}
 	onsubmit={handleUpdateAllVideos}
 />
-
-<CleanupDialog bind:open={cleanupDialogOpen} onFinished={reloadVideos} />
