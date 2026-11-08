@@ -1123,7 +1123,7 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
                 ),
             },
         ];
-        files.extend(collect_sidecars(&mp4, &target_stem, &season_dir));
+        files.extend(collect_sidecars(&mp4, &target_stem, &season_dir, true));
         plan.items.push(PlanItem {
             video_id: video.id,
             page_id: page.id,
@@ -1465,7 +1465,7 @@ async fn plan_movie(
                     ),
                 },
             ];
-            files.extend(collect_sidecars(&mp4, &stem, &folder));
+            files.extend(collect_sidecars(&mp4, &stem, &folder, false));
             plan.items.push(PlanItem {
                 video_id: video.id,
                 page_id: page.id,
@@ -2057,7 +2057,7 @@ fn find_video_poster(video_path: &str, first_page_path: Option<&str>) -> Option<
 
 /// 收集源视频旁的配套文件（字幕 srt、弹幕 ass、单集缩略图/封面），映射为输出目录中与视频硬链接同名的文件。
 /// Emby 播放视频时只读取与其同目录、同主文件名的外挂字幕/弹幕，因此必须复制到输出侧。
-fn collect_sidecars(source_video: &Path, target_stem: &str, target_dir: &Path) -> Vec<PendingFile> {
+fn collect_sidecars(source_video: &Path, target_stem: &str, target_dir: &Path, is_episode: bool) -> Vec<PendingFile> {
     let mut files = Vec::new();
     let Some(dir) = source_video.parent() else {
         return files;
@@ -2086,16 +2086,20 @@ fn collect_sidecars(source_video: &Path, target_stem: &str, target_dir: &Path) -
             });
         }
     }
-    // 单集图片：多页视频为 {stem}-thumb.jpg，单页视频为 {stem}-poster.jpg。
+    // 源图片：多页视频用 thumb，单页视频用 poster；TV 单集统一输出 thumb，优先使用源 thumb。
     // 图片属于 R5 强制覆盖的封面类（用户已确认），与 NFO 相同待遇
     for suffix in ["-thumb.jpg", "-poster.jpg"] {
         let source = dir.join(format!("{src_stem}{suffix}"));
         if source.is_file() {
+            let target_suffix = if is_episode { "-thumb.jpg" } else { suffix };
             files.push(PendingFile {
-                target: target_dir.join(format!("{target_stem}{suffix}")),
+                target: target_dir.join(format!("{target_stem}{target_suffix}")),
                 overwrite: true,
                 content: PendingContent::Copy(source),
             });
+            if is_episode {
+                break;
+            }
         }
     }
     files
@@ -2118,6 +2122,32 @@ mod tests {
         let dir = base.join(format!("{name}-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn test_sidecar_art_naming_and_priority() {
+        let root = temp_root("sidecar-art");
+        let source = root.join("EP.mp4");
+        let target = root.join("output");
+        let poster = root.join("EP-poster.jpg");
+        let thumb = root.join("EP-thumb.jpg");
+        touch(&poster);
+        for (is_episode, suffix) in [(true, "-thumb.jpg"), (false, "-poster.jpg")] {
+            let files = collect_sidecars(&source, "target", &target, is_episode);
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].target, target.join(format!("target{suffix}")));
+            assert!(files[0].overwrite);
+            assert!(matches!(&files[0].content, PendingContent::Copy(path) if path == &poster));
+        }
+        touch(&thumb);
+        let files = collect_sidecars(&source, "target", &target, true);
+        assert_eq!(files.len(), 1, "TV 两种源图共存时只输出一张");
+        assert_eq!(files[0].target, target.join("target-thumb.jpg"));
+        assert!(matches!(&files[0].content, PendingContent::Copy(path) if path == &thumb));
+        let files = collect_sidecars(&source, "target", &target, false);
+        assert_eq!(files.len(), 2, "电影保留 thumb 和 poster 各自的图片类型");
+        assert_eq!(files[0].target, target.join("target-thumb.jpg"));
+        assert_eq!(files[1].target, target.join("target-poster.jpg"));
     }
 
     /// 测试用固定日期构造（YYYY 年 1 月 d 日零时）
@@ -2415,7 +2445,7 @@ mod tests {
             "弹幕复制到输出侧"
         );
         assert!(season.join("source - S01E04.zh-CN.srt").is_file());
-        assert!(season.join("source - S01E04-poster.jpg").is_file());
+        assert!(season.join("source - S01E04-thumb.jpg").is_file());
         assert!(output.join("source").join("poster.jpg").is_file());
 
         // 重复执行：全部为刷新，集号不变，无副作用
@@ -2590,6 +2620,8 @@ mod tests {
         assert_same_inode(&folder_m1.join("视频BV1m1 (2019).mp4"), &mp4_m1);
         assert!(mp4_m1.is_file(), "源视频保持原样");
         assert!(folder_m1.join("poster.jpg").is_file());
+        assert!(folder_m1.join("视频BV1m1 (2019)-poster.jpg").is_file());
+        assert!(!folder_m1.join("视频BV1m1 (2019)-thumb.jpg").exists());
 
         // 版本名稳定性：首P（pid 1）源文件缺失后其余版本命名不变；补回后命名一致
         std::fs::remove_file(video_m2_dir.join("v1.mp4")).unwrap();
@@ -4199,7 +4231,7 @@ mod tests {
         std::fs::create_dir_all(new_target.parent().unwrap()).unwrap();
         let user_nfo = new_target.with_extension("nfo");
         let user_thumb = new_target.with_file_name(format!(
-            "{}-poster.jpg",
+            "{}-thumb.jpg",
             new_target.file_stem().unwrap().to_string_lossy()
         ));
         std::fs::write(&user_nfo, b"user nfo keep").unwrap();
@@ -4301,7 +4333,7 @@ mod tests {
         let new_target = new_item.target.clone().unwrap();
         let user_nfo = new_target.with_extension("nfo");
         let user_thumb = new_target.with_file_name(format!(
-            "{}-poster.jpg",
+            "{}-thumb.jpg",
             new_target.file_stem().unwrap().to_string_lossy()
         ));
         std::fs::write(&user_nfo, b"user nfo").unwrap();
@@ -4411,7 +4443,7 @@ mod tests {
         .unwrap();
         // 用户预置：单集 poster、剧集级 poster、tvshow.nfo（都在重整分片目录）
         let user_thumb = new_target.with_file_name(format!(
-            "{}-poster.jpg",
+            "{}-thumb.jpg",
             new_target.file_stem().unwrap().to_string_lossy()
         ));
         std::fs::write(&user_thumb, b"user single poster").unwrap();
@@ -4545,7 +4577,7 @@ mod tests {
         .await
         .unwrap();
         let user_thumb = new_target.with_file_name(format!(
-            "{}-poster.jpg",
+            "{}-thumb.jpg",
             new_target.file_stem().unwrap().to_string_lossy()
         ));
         std::fs::write(&user_thumb, b"user single poster").unwrap();
@@ -4656,7 +4688,7 @@ mod tests {
         tokio::fs::hard_link(&stranger_mp4, &new_target).await.unwrap();
         let user_nfo = new_target.with_extension("nfo");
         let user_poster = new_target.with_file_name(format!(
-            "{}-poster.jpg",
+            "{}-thumb.jpg",
             new_target.file_stem().unwrap().to_string_lossy()
         ));
         std::fs::write(&user_nfo, b"user nvo").unwrap();
@@ -4992,6 +5024,17 @@ mod tests {
         // 各分页图片独立：P1 有图，P2 缺图不嫁接
         assert!(season.join("剧名来源 - S01E01-thumb.jpg").is_file());
         assert!(!season.join("剧名来源 - S01E02-thumb.jpg").exists());
+        assert!(season.join("剧名来源 - S01E03-thumb.jpg").is_file());
+        assert!(!season.join("剧名来源 - S01E03-poster.jpg").exists());
+        assert!(dir_u2.join("EP-poster.jpg").is_file(), "源图片保持原样");
+        // 已有规则记录的旧版 poster 保留，重新整理补上 thumb。
+        let old_poster = season.join("剧名来源 - S01E03-poster.jpg");
+        std::fs::rename(season.join("剧名来源 - S01E03-thumb.jpg"), &old_poster).unwrap();
+        let refreshed = execute_rule(&rule, &db, None).await.unwrap();
+        assert_eq!(refreshed.failed, 0);
+        assert_eq!(refreshed.refreshed, 3);
+        assert!(old_poster.is_file());
+        assert!(season.join("剧名来源 - S01E03-thumb.jpg").is_file());
         let p2 = report.items.iter().find(|i| i.page_name == "分P2").unwrap();
         assert!(
             p2.message
@@ -5033,7 +5076,7 @@ mod tests {
         let _ = execute_rule(&rule, &db, None).await.unwrap();
         let season = output.join("source").join("Season 1");
         let nfo = season.join("source - S01E01.nfo");
-        let poster = season.join("source - S01E01-poster.jpg");
+        let poster = season.join("source - S01E01-thumb.jpg");
         // 用户手改 NFO 和封面
         std::fs::write(&nfo, b"user xml").unwrap();
         std::fs::write(&poster, b"user poster").unwrap();
