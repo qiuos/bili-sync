@@ -1,6 +1,7 @@
 name: Check
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -21,7 +22,7 @@ jobs:
   check-backend:
     name: Run backend checks
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
@@ -44,7 +45,7 @@ jobs:
   check-frontend:
     name: Run frontend checks
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     defaults:
       run:
         working-directory: web

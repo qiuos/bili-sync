@@ -1,6 +1,7 @@
 name: Build Main Binary
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
