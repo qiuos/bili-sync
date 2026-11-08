@@ -27,13 +27,7 @@
 		onclose?: () => void;
 	}
 
-	let {
-		open = $bindable(false),
-		title = '选择目录',
-		initialPath = '',
-		onConfirm,
-		onclose
-	}: Props = $props();
+	let { open, title = '选择目录', initialPath = '', onConfirm, onclose }: Props = $props();
 
 	let currentPath = $state('/');
 	let parentPath = $state<string | null>(null);
@@ -105,25 +99,26 @@
 				error = (err as ApiError).message;
 			});
 		} finally {
-			loading = false;
+			if (seq === requestSeq) loading = false;
 		}
 	}
 
 	function confirm() {
 		onConfirm(currentPath);
-		open = false;
+		requestClose();
 	}
 
-	// 打开期间父组件若提前卸载/切换 pickerTarget，本组件可能被销毁，清理对话框状态。
-	// onclose 非响应式 prop，写入 untrack 结果，避免 effect 同时依赖 open 与回调
-	$effect(() => {
-		if (!open && onclose) {
-			untrack(() => onclose?.());
+	// 关闭只能走父级：受控 open（无本地状态）。内部取消/确认/ESC/遮罩点击统一经 onclose，
+	// 父组件把开关状态置回 null 后本组件 open 转为 false，保证下次打开 prop 变化沿有效。
+	// 直接写本地 open 会与 `open={pickerTarget !== null}` 单向透传脱钩，第二次打开失效。
+	function requestClose() {
+		if (onclose) {
+			onclose();
 		}
-	});
+	}
 </script>
 
-<Dialog bind:open>
+<Dialog {open} onOpenChange={(v) => (v ? undefined : requestClose())}>
 	<DialogContent class="flex h-[70vh] max-h-[70vh] flex-col overflow-hidden sm:max-w-lg">
 		<DialogHeader class="shrink-0">
 			<DialogTitle class="flex items-center gap-2">
@@ -199,7 +194,7 @@
 		{/if}
 
 		<DialogFooter class="shrink-0">
-			<Button variant="outline" class="cursor-pointer" onclick={() => (open = false)}>取消</Button>
+			<Button variant="outline" class="cursor-pointer" onclick={requestClose}>取消</Button>
 			<Button class="cursor-pointer" onclick={confirm} disabled={loading || !!error}>
 				选择此目录
 			</Button>

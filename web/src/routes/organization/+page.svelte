@@ -8,6 +8,8 @@
 	import EyeIcon from '@lucide/svelte/icons/eye';
 	import SquarePenIcon from '@lucide/svelte/icons/square-pen';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
+	import PlayIcon from '@lucide/svelte/icons/play';
+	import CopyIcon from '@lucide/svelte/icons/copy';
 	import TvIcon from '@lucide/svelte/icons/tv';
 	import FilmIcon from '@lucide/svelte/icons/film';
 	import FolderInputIcon from '@lucide/svelte/icons/folder-input';
@@ -16,7 +18,7 @@
 	import RuleDialog from '$lib/components/organization/rule-dialog.svelte';
 	import PreviewDialog from '$lib/components/organization/preview-dialog.svelte';
 	import api from '$lib/api';
-	import type { ApiError, OrganizationRule } from '$lib/types';
+	import type { ApiError, OrganizationExecuteResponse, OrganizationRule } from '$lib/types';
 	import { onMount } from 'svelte';
 	import { setBreadcrumb } from '$lib/stores/breadcrumb';
 	import { toast } from 'svelte-sonner';
@@ -30,6 +32,75 @@
 
 	let previewRule = $state<OrganizationRule | null>(null);
 	let previewOpen = $state(false);
+
+	// 复制：以预填字段打开新建表单（id=0）。DraftRule 仅预填用，保存走创建接口，保存前不创建不执行
+	let draftRule = $state<OrganizationRule | null>(null);
+
+	function openCopy(rule: OrganizationRule) {
+		draftRule = { ...rule, id: 0, name: `${rule.name} 副本` };
+		editingRule = null;
+		ruleDialogOpen = false;
+		setTimeout(() => (ruleDialogOpen = true));
+	}
+
+	// 列表直接运行：电视剧直接执行；电影从预览取全部候选视频 ID 再执行。
+	// 无候选、失败等结果经 toast 提示；运行中禁止重复触发（runningRuleId 锁）。
+	let runningRuleId = $state<number | null>(null);
+
+	function showRunResult(rule: OrganizationRule, result: OrganizationExecuteResponse) {
+		const description = `新建 ${result.created}，刷新 ${result.refreshed}，跳过 ${result.skipped}，失败 ${result.failed}`;
+		const details = [
+			...result.warnings,
+			...result.items.flatMap((item) => (item.message ? [item.message] : []))
+		];
+		const uniqueDetails = [...new Set(details)];
+		if (result.failed || details.length) {
+			toast.warning(`「${rule.name}」整理完成，有待处理事项`, {
+				description: `${description}${uniqueDetails.length ? `；${uniqueDetails.slice(0, 3).join('；')}${uniqueDetails.length > 3 ? '；更多信息请查看整理预览' : ''}` : ''}`
+			});
+		} else {
+			toast.success(`「${rule.name}」整理完成`, { description });
+		}
+	}
+
+	async function runRule(rule: OrganizationRule) {
+		if (runningRuleId !== null) return;
+		runningRuleId = rule.id;
+		try {
+			if (rule.rule_type !== 'movie') {
+				const response = await api.organization.executeRule(rule.id);
+				showRunResult(rule, response.data);
+				return;
+			}
+			const plan = await api.organization.previewRule(rule.id);
+			const videoIds = [
+				...new Set(
+					plan.data.items
+						.filter((item) => item.action === 'create' || item.action === 'refresh')
+						.map((item) => item.video_id)
+				)
+			];
+			if (videoIds.length === 0) {
+				const details = [
+					...plan.data.warnings,
+					...plan.data.items.flatMap((item) => (item.message ? [item.message] : []))
+				];
+				toast.info(`「${rule.name}」没有可执行的候选视频`, {
+					description:
+						[...new Set(details)].slice(0, 3).join('；') ||
+						'源目录内没有已下载的电影，或视频均未下载完成'
+				});
+				return;
+			}
+			const response = await api.organization.executeRule(rule.id, videoIds);
+			showRunResult(rule, response.data);
+		} catch (error) {
+			console.error('执行整理失败：', error);
+			toast.error('执行整理失败', { description: (error as ApiError).message });
+		} finally {
+			runningRuleId = null;
+		}
+	}
 
 	let deletingRule = $state<OrganizationRule | null>(null);
 	let deleteDialogOpen = $state(false);
@@ -52,6 +123,7 @@
 
 	function openCreate() {
 		editingRule = null;
+		draftRule = null;
 		ruleDialogOpen = true;
 	}
 
@@ -192,6 +264,21 @@
 						<EyeIcon class="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
 						预览整理
 					</Button>
+					<Button
+						size="sm"
+						variant="outline"
+						class="h-8 cursor-pointer text-xs font-medium"
+						disabled={runningRuleId !== null}
+						onclick={() => runRule(rule)}
+					>
+						{#if runningRuleId === rule.id}
+							<LoaderCircleIcon class="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+							运行中...
+						{:else}
+							<PlayIcon class="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+							运行
+						{/if}
+					</Button>
 					<Tooltip.Root>
 						<Tooltip.Trigger
 							class="hover:bg-accent hover:text-accent-foreground inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border"
@@ -201,6 +288,16 @@
 							<SquarePenIcon class="h-3.5 w-3.5" aria-hidden="true" />
 						</Tooltip.Trigger>
 						<Tooltip.Content>编辑</Tooltip.Content>
+					</Tooltip.Root>
+					<Tooltip.Root>
+						<Tooltip.Trigger
+							class="hover:bg-accent hover:text-accent-foreground inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border"
+							aria-label="复制规则"
+							onclick={() => openCopy(rule)}
+						>
+							<CopyIcon class="h-3.5 w-3.5" aria-hidden="true" />
+						</Tooltip.Trigger>
+						<Tooltip.Content>复制</Tooltip.Content>
 					</Tooltip.Root>
 					<Tooltip.Root>
 						<Tooltip.Trigger
@@ -218,7 +315,7 @@
 	</div>
 {/if}
 
-<RuleDialog bind:open={ruleDialogOpen} rule={editingRule} onSuccess={loadRules} />
+<RuleDialog bind:open={ruleDialogOpen} rule={editingRule ?? draftRule} onSuccess={loadRules} />
 
 <PreviewDialog bind:open={previewOpen} rule={previewRule} onFinished={null} />
 

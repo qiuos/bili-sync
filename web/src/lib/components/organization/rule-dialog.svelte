@@ -63,7 +63,8 @@
 				source_path: sourcePath.trim(),
 				output_path: outputPath.trim()
 			};
-			if (rule) {
+			// id>0 为编辑已有规则；复制草稿（draftRule）带预填字段但 id=0，走新建接口，不触碰原规则
+			if (rule && rule.id > 0) {
 				await api.organization.updateRule(rule.id, request);
 				toast.success('规则已更新', { description: `「${request.name}」已保存` });
 			} else {
@@ -74,7 +75,7 @@
 			onSuccess?.();
 		} catch (error) {
 			console.error('保存整理规则失败：', error);
-			toast.error(rule ? '更新规则失败' : '创建规则失败', {
+			toast.error(rule && rule.id > 0 ? '更新规则失败' : '创建规则失败', {
 				description: (error as ApiError).message
 			});
 		} finally {
@@ -86,9 +87,13 @@
 <Sheet bind:open>
 	<SheetContent side="right" class="flex w-full flex-col sm:max-w-md">
 		<SheetHeader class="px-6 pb-2">
-			<SheetTitle class="text-lg">{rule ? '编辑整理规则' : '新建整理规则'}</SheetTitle>
+			<SheetTitle class="text-lg">
+				{rule && rule.id > 0 ? '编辑整理规则' : '新建整理规则'}
+			</SheetTitle>
 			<SheetDescription class="text-muted-foreground text-sm">
-				{rule ? `修改规则「${rule.name}」的配置` : '配置一条从源目录到输出媒体库的整理规则'}
+				{rule && rule.id > 0
+					? `修改规则「${rule.name}」的配置`
+					: '配置一条从源目录到输出媒体库的整理规则'}
 			</SheetDescription>
 		</SheetHeader>
 
