@@ -132,7 +132,7 @@
 					</Select.Root>
 					<p class="text-muted-foreground text-xs">
 						{ruleType === 'tv'
-							? '电视剧：按 UP 主用户名聚合为剧集，每个分P一集'
+							? '电视剧：源目录及子目录内的视频聚合为一部剧，源目录名称作为剧名，每个分P一集'
 							: '电影：不按 UP 主聚合，需要手动选择视频，多P视为同一电影的多个版本'}
 					</p>
 				</div>
