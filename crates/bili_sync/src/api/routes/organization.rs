@@ -11,10 +11,14 @@ use sea_orm::{
 };
 
 use crate::api::error::InnerApiError;
-use crate::api::request::{BrowseDirectoryRequest, OrganizationActionRequest, OrganizationRuleRequest};
+use crate::api::request::{
+    BrowseDirectoryRequest, OrganizationActionRequest, OrganizationRuleRequest, OrganizationSwitchAggregationRequest,
+    OrganizationSwitchPendingAction,
+};
 use crate::api::response::{
     DirectoryBrowseResponse, DirectoryEntry, OrganizationExecuteResponse, OrganizationPlanItem,
     OrganizationPlanResponse, OrganizationRuleResponse, OrganizationRulesResponse,
+    OrganizationSwitchAggregationResponse,
 };
 use crate::api::wrapper::{ApiError, ApiResponse, ValidatedJson};
 use crate::organization::{self, ItemAction, PlanItem};
@@ -25,6 +29,7 @@ pub(super) fn router() -> Router {
         .route("/organization/rules/{id}", put(update_rule).delete(delete_rule))
         .route("/organization/rules/{id}/preview", post(preview_rule))
         .route("/organization/rules/{id}/execute", post(execute_rule))
+        .route("/organization/rules/{id}/switch_aggregation", post(switch_aggregation))
         .route("/organization/directory", get(browse_directory))
 }
 
@@ -49,9 +54,12 @@ pub async fn create_rule(
     let _guard = organization::execution_lock().lock().await;
     let (source_path, output_path) =
         organization::validate_rule_paths(&db, None, &request.source_path, &request.output_path).await?;
+    let mode = request.aggregation_mode.unwrap_or_default().to_string();
+    organization::validate_aggregation_mode(&request.rule_type.to_string(), &mode)?;
     let rule = organization_rule::ActiveModel {
         name: Set(request.name),
         rule_type: Set(request.rule_type.to_string()),
+        aggregation_mode: Set(mode),
         source_path: Set(source_path),
         output_path: Set(output_path),
         ..Default::default()
@@ -73,11 +81,26 @@ pub async fn update_rule(
     };
     let (source_path, output_path) =
         organization::validate_rule_paths(&db, Some(id), &request.source_path, &request.output_path).await?;
-    // 已产生整理记录的规则锁定源目录/输出目录/规则类型，防止已记录归属被用于在新目标覆写
-    organization::ensure_rule_editable(&rule, &db, &source_path, &output_path, &request.rule_type.to_string()).await?;
+    // 已产生整理记录的规则锁定源目录/输出目录/规则类型/聚合方式，防止已记录归属被用于在新目标覆写；
+    // 聚合方式变更必须走 switch_aggregation 端点（带清理重建与确认）
+    let new_aggregation_mode = request
+        .aggregation_mode
+        .map(|mode| mode.to_string())
+        .unwrap_or_else(|| rule.aggregation_mode.clone());
+    organization::validate_aggregation_mode(&request.rule_type.to_string(), &new_aggregation_mode)?;
+    organization::ensure_rule_editable(
+        &rule,
+        &db,
+        &source_path,
+        &output_path,
+        &request.rule_type.to_string(),
+        &new_aggregation_mode,
+    )
+    .await?;
     let mut rule: organization_rule::ActiveModel = rule.into();
     rule.name = Set(request.name);
     rule.rule_type = Set(request.rule_type.to_string());
+    rule.aggregation_mode = Set(new_aggregation_mode);
     rule.source_path = Set(source_path);
     rule.output_path = Set(output_path);
     let rule = rule.update(&db).await?;
@@ -145,6 +168,64 @@ pub async fn execute_rule(
     }))
 }
 
+/// 切换电视剧规则的聚合方式：需显式确认；删除可证明归属的旧整理文件与记录后按新模式重整。
+/// 未知归属文件保留并在 retained_paths 报告；失败/中断保留 pending 状态，整理执行被拒绝，
+/// 可用 pending_action: retry 续作目标模式。
+pub async fn switch_aggregation(
+    Path(id): Path<i32>,
+    Extension(db): Extension<DatabaseConnection>,
+    Json(request): Json<OrganizationSwitchAggregationRequest>,
+) -> Result<ApiResponse<OrganizationSwitchAggregationResponse>, ApiError> {
+    if let Err(e) = request.ensure_confirmed() {
+        return Err(InnerApiError::BadRequest(format!("{:#}", e)).into());
+    }
+    let target = request.aggregation_mode.to_string();
+    let pending = organization_rule::Entity::find_by_id(id)
+        .one(&db)
+        .await?
+        .and_then(|rule| rule.pending_aggregation_mode);
+    let report = match (pending, request.pending_action) {
+        // 上次切换未完成：仅允许按同一目标 retry 续作
+        (Some(pending), Some(OrganizationSwitchPendingAction::Retry)) => {
+            if pending != target {
+                return Err(InnerApiError::BadRequest(format!(
+                    "进行中的切换目标是「{pending}」，无法切换到「{target}」；请先完成该切换"
+                ))
+                .into());
+            }
+            organization::resume_pending_switch(id, &db).await?
+        }
+        (Some(pending), None) => {
+            return Err(InnerApiError::BadRequest(format!(
+                "规则上次切换未完成（目标 {pending}），请用 pending_action: \"retry\" 重试"
+            ))
+            .into());
+        }
+        (None, Some(OrganizationSwitchPendingAction::Retry)) => {
+            return Err(InnerApiError::BadRequest("规则没有进行中的聚合方式切换".to_string()).into());
+        }
+        (None, None) => organization::switch_aggregation_mode(id, &db, &target).await?,
+    };
+    Ok(ApiResponse::ok(switch_response(report)))
+}
+
+fn switch_response(report: organization::SwitchAggregationReport) -> OrganizationSwitchAggregationResponse {
+    OrganizationSwitchAggregationResponse {
+        records_removed: report.records_removed,
+        files_removed: report.files_removed,
+        retained_paths: report.retained_paths,
+        execute: OrganizationExecuteResponse {
+            created: report.execute.created,
+            refreshed: report.execute.refreshed,
+            skipped: report.execute.skipped,
+            failed: report.execute.failed,
+            extras_created: report.execute.extras_created,
+            items: report.execute.items.iter().map(plan_item_response).collect(),
+            warnings: report.execute.warnings,
+        },
+    }
+}
+
 /// 浏览服务端目录，返回子目录列表，供媒体整理规则选择源/输出目录使用。
 /// 经 /api 统一认证保护；仅暴露目录名与绝对路径，不返回文件或目录内容。
 /// 路径非法、不存在、无法读取等均以 400 返回，便于用户修正输入
@@ -196,6 +277,8 @@ fn rule_response(rule: organization_rule::Model) -> OrganizationRuleResponse {
         id: rule.id,
         name: rule.name,
         rule_type: rule.rule_type,
+        aggregation_mode: rule.aggregation_mode,
+        pending_aggregation_mode: rule.pending_aggregation_mode,
         source_path: rule.source_path,
         output_path: rule.output_path,
     }

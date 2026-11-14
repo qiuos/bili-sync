@@ -37,7 +37,7 @@
 	let draftRule = $state<OrganizationRule | null>(null);
 
 	function openCopy(rule: OrganizationRule) {
-		draftRule = { ...rule, id: 0, name: `${rule.name} 副本` };
+		draftRule = { ...rule, id: 0, name: `${rule.name} 副本`, pending_aggregation_mode: null };
 		editingRule = null;
 		ruleDialogOpen = false;
 		setTimeout(() => (ruleDialogOpen = true));
@@ -228,6 +228,14 @@
 				</div>
 
 				<div class="min-w-0 flex-1 space-y-2 text-sm">
+					{#if rule.rule_type === 'tv'}
+						<p class="text-muted-foreground text-xs">
+							{rule.aggregation_mode === 'per_video' ? '按视频聚合' : '按源目录聚合'}
+						</p>
+						{#if rule.pending_aggregation_mode}
+							<p class="text-destructive text-xs" role="alert">切换未完成，请编辑规则并重试。</p>
+						{/if}
+					{/if}
 					<div class="flex items-start gap-2">
 						<FolderInputIcon
 							class="text-muted-foreground mt-0.5 h-4 w-4 shrink-0"
@@ -268,7 +276,7 @@
 						size="sm"
 						variant="outline"
 						class="h-8 cursor-pointer text-xs font-medium"
-						disabled={runningRuleId !== null}
+						disabled={runningRuleId !== null || Boolean(rule.pending_aggregation_mode)}
 						onclick={() => runRule(rule)}
 					>
 						{#if runningRuleId === rule.id}

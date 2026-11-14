@@ -13,11 +13,13 @@ import type {
 	InsertFavoriteRequest,
 	InsertSubmissionRequest,
 	Notifier,
+	OrganizationAggregationMode,
 	OrganizationExecuteResponse,
 	OrganizationPlanResponse,
 	OrganizationRule,
 	OrganizationRuleRequest,
 	OrganizationRulesResponse,
+	OrganizationSwitchResponse,
 	QrcodePollResponse as PollQrcodeResponse,
 	RedownloadResponse,
 	ResetFilteredVideosResponse,
@@ -205,6 +207,18 @@ class ApiClient {
 
 	async deleteOrganizationRule(id: number): Promise<ApiResponse<boolean>> {
 		return this.request<boolean>(`/organization/rules/${id}`, 'DELETE');
+	}
+
+	async switchOrganizationAggregation(
+		id: number,
+		mode: OrganizationAggregationMode,
+		retry = false
+	) {
+		return this.post<OrganizationSwitchResponse>(`/organization/rules/${id}/switch_aggregation`, {
+			aggregation_mode: mode,
+			confirm_delete: true,
+			pending_action: retry ? 'retry' : undefined
+		});
 	}
 
 	async previewOrganizationRule(
@@ -407,6 +421,8 @@ const api = {
 		updateRule: (id: number, request: OrganizationRuleRequest) =>
 			apiClient.updateOrganizationRule(id, request),
 		deleteRule: (id: number) => apiClient.deleteOrganizationRule(id),
+		switchAggregation: (id: number, mode: OrganizationAggregationMode, retry = false) =>
+			apiClient.switchOrganizationAggregation(id, mode, retry),
 		previewRule: (id: number, videoIds?: number[]) =>
 			apiClient.previewOrganizationRule(id, videoIds),
 		executeRule: (id: number, videoIds?: number[]) =>

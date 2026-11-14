@@ -11,6 +11,14 @@ pub struct Model {
     pub rule_type: String,
     pub source_path: String,
     pub output_path: String,
+    /// 电视剧聚合方式：source（按源目录聚合，旧行为）/ per_video（每视频一剧）；电影规则恒为 source
+    #[sea_orm(default_value = "source")]
+    pub aggregation_mode: String,
+    /// 进行中的聚合方式切换目标；切换完成（重建成功）前非空，期间整理执行一律拒绝
+    pub pending_aggregation_mode: Option<String>,
+    /// 切换后不再推定既有元数据归属；ponytail: 逐文件归属可验证后可改为按文件保护。
+    #[sea_orm(default_value = false)]
+    pub preserve_metadata: bool,
     pub created_at: String,
 }
 

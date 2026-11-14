@@ -241,6 +241,10 @@ pub struct OrganizationRuleResponse {
     pub id: i32,
     pub name: String,
     pub rule_type: String,
+    /// source（按源目录聚合）/ per_video（每视频一剧）
+    pub aggregation_mode: String,
+    /// 非空表示聚合方式切换未完成（值为目标模式）；期间整理执行被拒绝，须重试切换或恢复回旧模式
+    pub pending_aggregation_mode: Option<String>,
     pub source_path: String,
     pub output_path: String,
 }
@@ -282,6 +286,18 @@ pub struct OrganizationExecuteResponse {
     pub extras_created: usize,
     pub items: Vec<OrganizationPlanItem>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct OrganizationSwitchAggregationResponse {
+    /// 删除的旧整理记录条数（含重整意图记录）
+    pub records_removed: usize,
+    /// 按归属证明删除的整理文件数（视频硬链接 + 同 stem 元数据 + 空目录）
+    pub files_removed: usize,
+    /// 无法证明归属而保留的路径（未知文件不删不覆盖，仅报告）
+    pub retained_paths: Vec<String>,
+    /// 按新模式重新整理的执行报告
+    pub execute: OrganizationExecuteResponse,
 }
 
 #[derive(Serialize)]

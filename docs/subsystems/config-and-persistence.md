@@ -55,7 +55,7 @@
 
 ## Organization persistence
 
-- `organization_rule` stores each rule name, type, source and output directories. `organization_output` stores rule ID, video/page identity, output path and optional TV series and episode number; `(rule_id, bvid, cid)` is unique.
+- `organization_rule` stores each rule name, type, aggregation mode, pending aggregation target, metadata preservation flag, source and output directories. Existing rules migrate to `source`; a pending target survives interruption and blocks normal execution until retry. `organization_output` stores rule ID, video/page identity, output path and optional TV series and episode number; `(rule_id, bvid, cid)` is unique.
 - Deleting a rule removes its output records but leaves generated files on disk. Episode history is consequently lost; a new rule does not adopt those files. See [media-artifacts.md](media-artifacts.md) for output behavior.
 
 ## Constraints and failures
@@ -73,7 +73,7 @@
   - `setup_database` failure surfaces as `数据库初始化失败`; permission problems on the config dir surface as `Failed to create config directory…`.
   - A failed `VersionedCache` rebuild only logs; the previous cached value keeps being used.
 - Compatibility / migration behavior:
-  - Migrations in order: `m20240322_000001_create_table`, `m20240505_130850_add_collection`, `m20240709_130914_watch_later`, `m20240724_161008_submission`, `m20250122_062926_add_latest_row_at`, `m20250612_090826_add_enabled`, `m20250613_043257_add_config`, `m20250712_080013_add_video_created_at_index`, `m20250903_094454_add_rule_and_should_download`, `m20251009_123713_add_use_dynamic_api`, `m20260324_055217_add_staff`, `m20260712_123205_add_filter_option`, `m20260821_025000_mark_empty_tags_for_refetch`, `m20260823_000001_add_danmaku_last_synced_at`, `m20261106_000001_add_organization`.
+  - Migrations in order: `m20240322_000001_create_table`, `m20240505_130850_add_collection`, `m20240709_130914_watch_later`, `m20240724_161008_submission`, `m20250122_062926_add_latest_row_at`, `m20250612_090826_add_enabled`, `m20250613_043257_add_config`, `m20250712_080013_add_video_created_at_index`, `m20250903_094454_add_rule_and_should_download`, `m20251009_123713_add_use_dynamic_api`, `m20260324_055217_add_staff`, `m20260712_123205_add_filter_option`, `m20260821_025000_mark_empty_tags_for_refetch`, `m20260823_000001_add_danmaku_last_synced_at`, `m20261106_000001_add_organization`, `m20261114_000001_add_aggregation_mode`.
   - New `Config` fields must have `#[serde(default)]`/defaulted types so existing rows deserialize.
   - `m20260821_025000_mark_empty_tags_for_refetch` exists because previously stored `tags` could be empty; keep that behavior in mind when adding tag-dependent logic.
 

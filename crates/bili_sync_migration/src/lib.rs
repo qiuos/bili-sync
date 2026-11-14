@@ -15,6 +15,7 @@ mod m20260712_123205_add_filter_option;
 mod m20260821_025000_mark_empty_tags_for_refetch;
 mod m20260823_000001_add_danmaku_last_synced_at;
 mod m20261106_000001_add_organization;
+mod m20261114_000001_add_aggregation_mode;
 
 pub struct Migrator;
 
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260821_025000_mark_empty_tags_for_refetch::Migration),
             Box::new(m20260823_000001_add_danmaku_last_synced_at::Migration),
             Box::new(m20261106_000001_add_organization::Migration),
+            Box::new(m20261114_000001_add_aggregation_mode::Migration),
         ]
     }
 }

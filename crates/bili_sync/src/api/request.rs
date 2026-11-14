@@ -185,10 +185,58 @@ pub struct OrganizationRuleRequest {
     #[validate(length(min = 1, max = 100))]
     pub name: String,
     pub rule_type: OrganizationRuleType,
+    /// 电视剧聚合方式：source（按源目录聚合，缺省旧行为）/ per_video（每视频一剧）；电影规则只允许 source
+    pub aggregation_mode: Option<OrganizationAggregationMode>,
     #[validate(custom(function = "crate::utils::validation::validate_path"))]
     pub source_path: String,
     #[validate(custom(function = "crate::utils::validation::validate_path"))]
     pub output_path: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationAggregationMode {
+    #[default]
+    Source,
+    PerVideo,
+}
+
+impl std::fmt::Display for OrganizationAggregationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source => write!(f, "source"),
+            Self::PerVideo => write!(f, "per_video"),
+        }
+    }
+}
+
+/// 聚合方式切换请求：用户已在界面确认删除旧整理文件后重建
+#[derive(Deserialize)]
+pub struct OrganizationSwitchAggregationRequest {
+    pub aggregation_mode: OrganizationAggregationMode,
+    /// 必须为 true：显式确认删除可证明归属的旧整理文件与记录
+    pub confirm_delete: bool,
+    /// 上次切换未完成时的处理：retry = 继续完成目标模式切换（重新确认删除语义）；
+    /// 缺省 = 仅允许全新切换，存在 pending 时拒绝
+    pub pending_action: Option<OrganizationSwitchPendingAction>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationSwitchPendingAction {
+    /// 继续完成上次未完成的切换（清理→提交→重建按目标模式续作）
+    Retry,
+}
+
+impl OrganizationSwitchAggregationRequest {
+    /// 未显式确认时拒绝
+    pub fn ensure_confirmed(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.confirm_delete,
+            "切换聚合方式会删除旧整理文件与记录后重建，需在界面确认后显式传 confirm_delete: true"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Default)]

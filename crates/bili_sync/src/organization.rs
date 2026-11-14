@@ -39,6 +39,23 @@ pub fn paths_overlap(a: &Path, b: &Path) -> bool {
 /// 意图记录在重整开始前写入、完成后删除（残留由下次重跑自愈清理），是对新目标路径的持久拥有声明。
 const REORG_INTENT_PREFIX: &str = "reorg=";
 
+/// 电视剧聚合方式：source（按源目录聚合为同一部剧，旧行为）/ per_video（每视频一部剧）
+pub const AGGREGATION_SOURCE: &str = "source";
+pub const AGGREGATION_PER_VIDEO: &str = "per_video";
+
+/// 校验聚合方式取值；电影规则只允许 source（聚合方式对电影无意义）
+pub(crate) fn validate_aggregation_mode(rule_type: &str, aggregation_mode: &str) -> Result<()> {
+    anyhow::ensure!(
+        matches!(aggregation_mode, AGGREGATION_SOURCE | AGGREGATION_PER_VIDEO),
+        "未知的聚合方式：{aggregation_mode}"
+    );
+    anyhow::ensure!(
+        rule_type != "movie" || aggregation_mode == AGGREGATION_SOURCE,
+        "电影规则不支持按视频聚合"
+    );
+    Ok(())
+}
+
 fn reorg_intent_bvid(bvid: &str) -> String {
     format!("{REORG_INTENT_PREFIX}{bvid}")
 }
@@ -120,6 +137,13 @@ pub async fn verified_download_links(db: &DatabaseConnection, source: &Path) -> 
 /// （符号链接别名或外链会让 create_dir_all/写入越过输出目录边界）。
 /// 尚不存在的路径节点跳过符号链接检查，由写入时创建目录后的复查兜底。
 fn ensure_path_within(root: &Path, target: &Path) -> Result<()> {
+    let relative = target.strip_prefix(root).context("目标路径越出输出目录边界")?;
+    anyhow::ensure!(
+        relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_))),
+        "目标路径包含非法路径分量"
+    );
     let mut cur = target.to_path_buf();
     loop {
         match cur.symlink_metadata() {
@@ -206,7 +230,13 @@ pub async fn ensure_rule_editable(
     new_source_path: &str,
     new_output_path: &str,
     new_rule_type: &str,
+    new_aggregation_mode: &str,
 ) -> Result<()> {
+    anyhow::ensure!(
+        rule.pending_aggregation_mode.is_none(),
+        "规则「{}」的聚合方式切换尚未完成，请先重试切换",
+        rule.name
+    );
     let has_records = organization_output::Entity::find()
         .filter(organization_output::Column::RuleId.eq(rule.id))
         .one(db)
@@ -215,11 +245,15 @@ pub async fn ensure_rule_editable(
     if !has_records {
         return Ok(());
     }
-    if rule.source_path == new_source_path && rule.output_path == new_output_path && rule.rule_type == new_rule_type {
+    if rule.source_path == new_source_path
+        && rule.output_path == new_output_path
+        && rule.rule_type == new_rule_type
+        && rule.aggregation_mode == new_aggregation_mode
+    {
         return Ok(());
     }
     bail!(
-        "规则「{}」已产生整理记录，不允许修改源目录、输出目录或规则类型；请先删除该规则（保留文件）后新建",
+        "规则「{}」已产生整理记录，不允许修改源目录、输出目录、规则类型或聚合方式；请通过聚合方式切换或删除该规则（保留文件）后新建",
         rule.name
     );
 }
@@ -395,6 +429,19 @@ pub async fn execute_rule(
     video_ids: Option<&[i32]>,
 ) -> Result<ExecuteReport> {
     let _guard = EXECUTE_LOCK.lock().await;
+    execute_rule_locked(rule, db, video_ids, false).await
+}
+
+/// 已持执行锁的内部执行路径（调用方必须持有 EXECUTE_LOCK，
+/// 如 switch_aggregation_mode 在清理与模式更新后原锁内重建）
+async fn execute_rule_locked(
+    rule: &organization_rule::Model,
+    db: &DatabaseConnection,
+    video_ids: Option<&[i32]>,
+    // 仅 run_pending_switch 的重建步骤允许 true：pending 声明本身要求本次按目标模式重建，
+    // 跳过 pending 拒绝；其余内部调用一律 false（持锁后按 id 重读规则，pending 拒绝生效）
+    allow_pending: bool,
+) -> Result<ExecuteReport> {
     // 真实 API 中规则 id 为自增主键恒大于 0；未持久化（id=0）规则仅允许在测试中直连执行
     #[cfg(not(test))]
     anyhow::ensure!(rule.id > 0, "规则尚未持久化，无法执行");
@@ -412,6 +459,15 @@ pub async fn execute_rule(
     anyhow::ensure!(
         !paths_overlap(&output, &source),
         "输出目录与源目录相同或存在嵌套，拒绝执行"
+    );
+    validate_aggregation_mode(&rule.rule_type, &rule.aggregation_mode)?;
+    // 聚合方式切换进行中：任何整理执行（含自动整理）一律拒绝，杜绝混合输出与归属漂移；
+    // 必须先重试完成切换（重建步骤由 allow_pending 放行）
+    anyhow::ensure!(
+        allow_pending || rule.pending_aggregation_mode.is_none(),
+        "规则「{}」聚合方式切换尚未完成（目标 {}），已拒绝整理执行；请重试切换",
+        rule.name,
+        rule.pending_aggregation_mode.as_deref().unwrap_or("?")
     );
     let mut plan = match rule.rule_type.as_str() {
         "tv" => plan_tv(&rule, db, &source).await?,
@@ -836,14 +892,39 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
     if undownloaded > 0 {
         plan.warnings.push(format!("{undownloaded} 个视频尚未下载完成，已跳过"));
     }
-    // 剧名：规则源目录的最后一级名称。同一源目录内所有 UP 主的视频聚合为同一部剧（R2）
-    let series = source
+    // 分组：source 模式沿用旧行为，全部候选聚合为以源目录名命名的一部剧；
+    // per_video 模式每个视频独立成组（剧名用视频标题，同标题也不合并，交由目录归属检查冲突）
+    let per_video = rule.aggregation_mode == AGGREGATION_PER_VIDEO;
+    let source_series = source
         .file_name()
         .and_then(|name| name.to_str())
         .map(str::to_string)
         .with_context(|| format!("源目录缺少可用的末级目录名：{}", source.display()))?;
+    let mut series_of_video: HashMap<i32, String> = HashMap::new();
+    let mut used_stems: HashMap<String, String> = HashMap::new();
+    let mut groups: Vec<(String, Option<String>, Vec<(video::Model, page::Model)>)> = Vec::new();
+    for (video, pages) in candidates {
+        let entries: Vec<(video::Model, page::Model)> = pages.into_iter().map(|page| (video.clone(), page)).collect();
+        if per_video {
+            series_of_video.insert(video.id, video.name.clone());
+            groups.push((video.name.clone(), Some(video.bvid.clone()), entries));
+        } else if let Some((_, owner, group)) = groups.first_mut() {
+            group.extend(entries);
+            let _ = owner;
+        } else {
+            groups.push((source_series.clone(), None, entries));
+        }
+    }
     for (video, page) in &missing_pages {
         let episode = own.get(&(video.bvid.clone(), page.cid)).and_then(|row| row.episode);
+        let series = if per_video {
+            series_of_video
+                .get(&video.id)
+                .cloned()
+                .unwrap_or_else(|| video.name.clone())
+        } else {
+            source_series.clone()
+        };
         plan.items.push(PlanItem {
             reorg: false,
             video_id: video.id,
@@ -852,7 +933,7 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
             cid: page.cid,
             video_name: video.name.clone(),
             page_name: page.name.clone(),
-            series: Some(series.clone()),
+            series: Some(series),
             episode,
             action: ItemAction::Missing("源视频文件不存在".to_string()),
             target: None,
@@ -861,14 +942,75 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
         });
     }
 
-    // 全部候选视频归入以源目录名命名的同一部剧（跨 UP 主聚合，同名 UP 合并）
-    let entries: Vec<(video::Model, page::Model)> = candidates
-        .into_iter()
-        .flat_map(|(video, pages)| pages.into_iter().map(move |page| (video.clone(), page)))
-        .collect();
-    // 剧名：规则源目录的最后一级名称。同一源目录内所有 UP 主的视频聚合为同一部剧（R2）
-    // 注：skip 上面重复块
+    for (series, owner_bvid, entries) in groups {
+        plan_tv_series(
+            &mut plan,
+            &own,
+            &own_rows,
+            &reorg_intents,
+            &other_keys,
+            &other_rules,
+            &foreign_paths,
+            &output,
+            series,
+            entries,
+            owner_bvid.as_deref(),
+            &mut used_stems,
+        )
+        .await?;
+    }
+    plan.items.sort_by_key(|item| {
+        (
+            item.series.clone().unwrap_or_default(),
+            item.episode.unwrap_or(0),
+            item.page_id,
+        )
+    });
+    Ok(plan)
+}
+
+/// 单个剧集分组的整理计划：目录归属检查、集号分配与重整意图识别（source/per_video 共用）
+#[allow(clippy::too_many_arguments)]
+async fn plan_tv_series(
+    plan: &mut Plan,
+    own: &HashMap<PageKey, &organization_output::Model>,
+    own_rows: &[organization_output::Model],
+    reorg_intents: &HashMap<(String, i64), &organization_output::Model>,
+    other_keys: &HashMap<PageKey, i32>,
+    other_rules: &HashMap<i32, String>,
+    foreign_paths: &[(String, String)],
+    output: &Path,
+    series: String,
+    entries: Vec<(video::Model, page::Model)>,
+    // per_video 模式下本分组的所属视频 bvid：目录归属按 (剧名, bvid) 判定——
+    // 同剧名的其它视频记录是 OtherOwned（同名/规范化碰撞不合并，AC4）；source 模式为 None
+    owner_bvid: Option<&str>,
+    // 本次规划中已被同 stem 的前序分组占用（不同 owner）的 stem 键：整组冲突，不合并
+    used_stems: &mut HashMap<String, String>,
+) -> Result<()> {
+    if !entries.is_empty()
+        && entries
+            .iter()
+            .all(|(video, page)| other_keys.contains_key(&page_key(video, page)))
+    {
+        push_tv_conflict_group(plan, &entries, &series, "该视频的分页均已被其他规则整理".to_string());
+        return Ok(());
+    }
     let computed_stem = filenamify(&series);
+    let stem_key = normalize_component(&computed_stem);
+    // 同名/规范化碰撞：本次规划中前序分组已占用同 stem 且 owner 不同（source 模式分组共享
+    // owner=None 不受影响）；持久记录在首次执行前不存在，必须按规划内占用判定冲突（AC4）
+    if let Some(prev) = used_stems.get(&stem_key)
+        && prev != owner_bvid.unwrap_or("")
+    {
+        let message = "目标剧集目录已被本次规划中的其它视频占用，同名碰撞不合并，整组跳过".to_string();
+        plan.warnings.push(format!(
+            "剧集目录「{computed_stem}」{message}（{}）",
+            owner_bvid.unwrap_or("?")
+        ));
+        push_tv_conflict_group(plan, &entries, &series, message);
+        return Ok(());
+    }
     // 跨次/既有目录归属检查：无论目录当前是否存在，都必须有本规则按该剧名的持久记录
     // 证明归属；否则保守冲突（记录可能先于写入，或目录事后被删除/移动）。
     let existing = find_existing_name(&output, &computed_stem)?;
@@ -886,7 +1028,10 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
         dir_ownership(
             &series_dir,
             &own_rows,
-            |row| row.series.as_deref() == Some(series.as_str()),
+            |row| {
+                row.series.as_deref() == Some(series.as_str())
+                    && owner_bvid.is_none_or(|bvid| row.bvid == bvid || row.bvid == reorg_intent_bvid(bvid))
+            },
             &foreign_paths,
         )
     };
@@ -915,7 +1060,10 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
             plan.warnings.push(format!(
                 "剧集目录「{series_stem}」已存在但没有本规则（按剧名「{series}」）的整理记录，无法确认归属，整组跳过"
             ));
-            Some("目标目录已存在但无法确认归属（可能是用户目录或此前整理记录已丢失的另一作品）".to_string())
+            Some(format!(
+                "目标目录「{}」无法确认归属；请先将该目录移出输出目录，再重试。原文件不会自动删除",
+                series_dir.display()
+            ))
         }
         _ => None,
     };
@@ -931,9 +1079,10 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
         })
     });
     if let Some(message) = conflict {
-        push_tv_conflict_group(&mut plan, &entries, &series, message);
-        return Ok(plan);
+        push_tv_conflict_group(plan, &entries, &series, message);
+        return Ok(());
     }
+    used_stems.insert(stem_key, owner_bvid.unwrap_or("").to_string());
     let season_dir = series_dir.join("Season 1");
 
     let stem = format!("{series_stem} - S01E");
@@ -941,6 +1090,8 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
     let mut max_episode = own_rows
         .iter()
         .filter(|row| row.series.as_deref() == Some(series.as_str()))
+        // per_video 模式下同剧名只允许本视频（含其重整意图）的记录参与续编号
+        .filter(|row| owner_bvid.is_none_or(|bvid| row.bvid == bvid || row.bvid == reorg_intent_bvid(bvid)))
         .filter_map(|row| row.episode)
         .max()
         .unwrap_or(0);
@@ -1140,14 +1291,7 @@ async fn plan_tv(rule: &organization_rule::Model, db: &DatabaseConnection, sourc
             message: None,
         });
     }
-    plan.items.sort_by_key(|item| {
-        (
-            item.series.clone().unwrap_or_default(),
-            item.episode.unwrap_or(0),
-            item.page_id,
-        )
-    });
-    Ok(plan)
+    Ok(())
 }
 
 /// 电影规则整理计划。video_ids 为 None 时预览源目录全部候选（仅预览可用；
@@ -1686,9 +1830,11 @@ async fn execute_plan(
                         let foreign = foreign_paths
                             .iter()
                             .any(|foreign_path| *foreign_path == file.target.to_string_lossy());
-                        if let (PendingContent::HardLink(source), true, true) =
-                            (&file.content, item.reorg, path_occupied(&file.target))
-                        {
+                        if let (PendingContent::HardLink(source), true, true) = (
+                            &file.content,
+                            item.reorg || rule.preserve_metadata || rule.pending_aggregation_mode.is_some(),
+                            path_occupied(&file.target),
+                        ) {
                             if !same_source_hardlink(source, &file.target) {
                                 failure = Some(format!(
                                     "重整目标「{}」在计划后已被外部替换（非本源视频同源文件），拒绝覆盖并保留旧记录",
@@ -1708,6 +1854,10 @@ async fn execute_plan(
                                 file.target.display()
                             ));
                             break;
+                        }
+                        if file.overwrite && (rule.preserve_metadata || rule.pending_aggregation_mode.is_some()) {
+                            partial = true;
+                            continue;
                         }
                         if !file.overwrite || foreign {
                             partial = true;
@@ -1809,9 +1959,9 @@ async fn execute_plan(
             continue;
         }
         let result = if path_occupied(&extra.target) {
-            if has_reorg {
+            if has_reorg || rule.preserve_metadata || rule.pending_aggregation_mode.is_some() {
                 report.warnings.push(format!(
-                    "目录「{}」存在重整条目，既有产物「{}」归属无法证明，未覆盖（只补缺）",
+                    "目录「{}」既有产物「{}」归属无法证明，未覆盖（只补缺）",
                     dir.display(),
                     extra.target.display()
                 ));
@@ -1824,9 +1974,12 @@ async fn execute_plan(
         };
         match result {
             Ok(()) => report.extras_created += 1,
-            Err(e) => report
-                .warnings
-                .push(format!("写入「{}」失败：{:#}", extra.target.display(), e)),
+            Err(e) => {
+                report.failed += 1;
+                report
+                    .warnings
+                    .push(format!("写入「{}」失败：{:#}", extra.target.display(), e));
+            }
         }
     }
     Ok(report)
@@ -2105,6 +2258,210 @@ fn collect_sidecars(source_video: &Path, target_stem: &str, target_dir: &Path, i
     files
 }
 
+/// 聚合方式切换结果
+#[derive(Debug, Default)]
+pub struct SwitchAggregationReport {
+    /// 旧整理记录条数（全部已删除；含重整意图记录）
+    pub records_removed: usize,
+    /// 按归属证明删除的整理文件数（与源视频同 inode 的旧视频硬链接，含意图声明的 mp4）
+    pub files_removed: usize,
+    /// 无法证明归属而保留的路径（未知文件/目录级 extras/非同源 mp4，不删不覆盖，仅报告）
+    pub retained_paths: Vec<String>,
+    /// 按新模式重新整理的执行报告
+    pub execute: ExecuteReport,
+}
+
+/// 切换电视剧规则的聚合方式（source ↔ per_video），持全局执行锁全程串行。
+/// 持久状态机（pending_aggregation_mode 列），崩溃/中断后重试可从断点安全续作：
+/// 1) 进入 pending：先落 pending_aggregation_mode = 目标模式（先行持久声明，之后任何
+///    整理执行一律拒绝，杜绝中断期间按旧模式自动重建产生混合输出或丢失归属）；
+/// 2) 清理：删除可证明归属的旧整理文件与全部整理记录（含意图记录；其余文件保留并报告，
+///    重整意图残留被顺带清理，无需前置收敛）；
+/// 3) 提交：更新 aggregation_mode = 目标模式；
+/// 4) 重建：按新模式重新整理（episode 从 1 重新编号），成功后清除 pending。
+/// 各步幂等，重试按剩余状态继续；重建失败保留 pending，修复后重试续作。
+/// 用户在 pending 期间必须显式调用本端点重试（前端将 pending_aggregation_mode 非空展示为
+/// “切换未完成”）。
+pub async fn switch_aggregation_mode(
+    rule_id: i32,
+    db: &DatabaseConnection,
+    new_mode: &str,
+) -> Result<SwitchAggregationReport> {
+    let _guard = EXECUTE_LOCK.lock().await;
+    let rule = organization_rule::Entity::find_by_id(rule_id)
+        .one(db)
+        .await?
+        .with_context(|| format!("规则 {rule_id} 不存在"))?;
+    anyhow::ensure!(rule.rule_type == "tv", "仅电视剧规则支持切换聚合方式");
+    validate_aggregation_mode(&rule.rule_type, new_mode)?;
+    anyhow::ensure!(
+        rule.pending_aggregation_mode.is_none(),
+        "规则「{}」上次的聚合方式切换尚未完成（目标 {}），请先重试切换至该目标",
+        rule.name,
+        rule.pending_aggregation_mode.as_deref().unwrap_or("?")
+    );
+    anyhow::ensure!(rule.aggregation_mode != new_mode, "规则已是该聚合方式，无需切换");
+    // 1) 先落 pending（持久声明切换中），再动任何文件/记录
+    organization_rule::ActiveModel {
+        id: Set(rule.id),
+        pending_aggregation_mode: Set(Some(new_mode.to_string())),
+        preserve_metadata: Set(true),
+        ..Default::default()
+    }
+    .update(db)
+    .await?;
+    let mut rule = rule;
+    rule.pending_aggregation_mode = Some(new_mode.to_string());
+    rule.preserve_metadata = true;
+    run_pending_switch(&mut rule, db, new_mode).await
+}
+
+/// 恢复上次未完成的切换：按 pending 目标继续完成（清理→提交→重建），返回完整切换报告。
+/// pending_aggregation_mode 为空时明确报错（无进行中的切换）
+pub async fn resume_pending_switch(rule_id: i32, db: &DatabaseConnection) -> Result<SwitchAggregationReport> {
+    let _guard = EXECUTE_LOCK.lock().await;
+    let mut rule = organization_rule::Entity::find_by_id(rule_id)
+        .one(db)
+        .await?
+        .with_context(|| format!("规则 {rule_id} 不存在"))?;
+    let target = rule
+        .pending_aggregation_mode
+        .clone()
+        .context("该规则没有进行中的聚合方式切换")?;
+    anyhow::ensure!(rule.rule_type == "tv", "仅电视剧规则支持切换聚合方式");
+    validate_aggregation_mode(&rule.rule_type, &target)?;
+    run_pending_switch(&mut rule, db, &target).await
+}
+
+/// 执行 pending 切换的清理→提交→重建流程（调用方已持 EXECUTE_LOCK）
+async fn run_pending_switch(
+    rule: &mut organization_rule::Model,
+    db: &DatabaseConnection,
+    target_mode: &str,
+) -> Result<SwitchAggregationReport> {
+    let output = revalidate_output(&rule.output_path).await?;
+    let mut report = SwitchAggregationReport {
+        records_removed: 0,
+        files_removed: 0,
+        retained_paths: Vec::new(),
+        execute: ExecuteReport::default(),
+    };
+    // 模式更新是清理完成的持久阶段标记：重建中断后不能再次删除新记录。
+    if rule.aggregation_mode != target_mode {
+        cleanup_rule_outputs(rule, db, &output, &mut report).await?;
+        organization_rule::ActiveModel {
+            id: Set(rule.id),
+            aggregation_mode: Set(target_mode.to_string()),
+            ..Default::default()
+        }
+        .update(db)
+        .await?;
+        rule.aggregation_mode = target_mode.to_string();
+    }
+    // 4) 重建：episode 从 1 重新编号（旧记录已全部删除）。
+    // 调用方已持 EXECUTE_LOCK，走免重复加锁的内部路径；重建按目标模式放行 pending
+    // （持锁后按 id 重读的规则 pending 仍为 Some，重建完成前保持拒绝外部执行）
+    report.execute = execute_rule_locked(&rule_with_mode(rule, target_mode), db, None, true).await?;
+    // 冲突和缺失计入 skipped，不应当作重建成功；保留 pending 及详细报告供重试。
+    let incomplete = report.execute.failed > 0
+        || report.execute.items.iter().any(|item| {
+            matches!(
+                item.action,
+                ItemAction::Conflict(_) | ItemAction::Missing(_) | ItemAction::Exists
+            )
+        });
+    if !incomplete {
+        organization_rule::ActiveModel {
+            id: Set(rule.id),
+            pending_aggregation_mode: Set(None),
+            ..Default::default()
+        }
+        .update(db)
+        .await?;
+    }
+    Ok(report)
+}
+
+/// 以指定聚合方式构造规则模型副本（重新整理用，不落库）
+fn rule_with_mode(rule: &organization_rule::Model, mode: &str) -> organization_rule::Model {
+    let mut rule = rule.clone();
+    rule.aggregation_mode = mode.to_string();
+    rule
+}
+
+/// 删除规则可证明归属的整理文件与全部整理记录（含重整意图）。
+/// 唯一删除凭证：持久记录（含意图记录）声明的视频文件路径，且该文件与源视频分页文件
+/// 同 inode（dev+ino）的硬链接，且位于本规则输出目录内、祖先无符号链接。
+/// 其余任何文件一律保留并在 retained_paths 报告（无法证明归属）：
+/// - 同 stem 的 .nfo/.srt/.ass/-thumb.jpg/-poster.jpg（用户可能放了同名文件，旧记录不保存
+///   逐文件归属，stem 命名不构成所有权证明）；
+/// - 目录级 tvshow.nfo/poster/fanart 与任何目录（extras 无逐文件记录）；
+/// - 非同源 mp4（用户替换过的文件）。
+/// 源下载文件绝不删除。记录按规则 id 全量删除（含先于本函数存在的意图记录）。
+/// 中断可重试：每一步独立完成，重试按剩余凭证继续收敛。
+pub async fn cleanup_rule_outputs(
+    rule: &organization_rule::Model,
+    db: &DatabaseConnection,
+    output: &Path,
+    report: &mut SwitchAggregationReport,
+) -> Result<()> {
+    let rows = organization_output::Entity::find()
+        .filter(organization_output::Column::RuleId.eq(rule.id))
+        .all(db)
+        .await?;
+    report.records_removed = rows.len();
+    if !rows.is_empty() {
+        report
+            .retained_paths
+            .push("旧目录中的 NFO、封面、字幕等文件无法证明归属，已保留".to_string());
+    }
+    let source_root = revalidate_dir(&rule.source_path, "源目录")?;
+    anyhow::ensure!(!paths_overlap(&source_root, output), "源目录与输出目录重叠，拒绝删除");
+    for row in &rows {
+        let target = PathBuf::from(&row.path);
+        // 边界：路径必须真实位于本规则输出目录内且无符号链接（否则视为未知归属，只删记录）
+        let within = ensure_path_within(output, &target).is_ok();
+        // mp4 归属凭证：与源视频同 inode 的硬链接（意图声明的 mp4 同样按源校验，证据同源）
+        let mp4_owned = within
+            && page::Entity::find()
+                .filter(page::Column::Cid.eq(row.cid))
+                .filter(page::Column::Path.is_not_null())
+                .all(db)
+                .await?
+                .iter()
+                .filter_map(|page| page.path.as_ref().filter(|p| !p.is_empty()))
+                .any(|source| {
+                    let source = Path::new(source);
+                    source != target
+                        && std::fs::canonicalize(source).is_ok_and(|path| path.starts_with(&source_root))
+                        && same_source_hardlink(source, &target)
+                });
+        if !mp4_owned {
+            if !within || path_occupied(&target) {
+                bail!("旧整理文件「{}」归属无法证明，已保留；请处理后重试", target.display());
+            }
+            continue;
+        }
+        match tokio::fs::remove_file(&target).await {
+            Ok(()) => report.files_removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                report.retained_paths.push(row.path.clone());
+                bail!(
+                    "删除整理文件「{}」失败：{e:#}；已删除的文件保持原状，修复后可重试",
+                    target.display()
+                );
+            }
+        }
+    }
+    // 最后删记录：文件删失败时不删任何记录（bail 已提前返回）；全量删除含意图记录
+    organization_output::Entity::delete_many()
+        .filter(organization_output::Column::RuleId.eq(rule.id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use bili_sync_migration::MigratorTrait;
@@ -2239,6 +2596,9 @@ mod tests {
             id: 0,
             name: name.to_string(),
             rule_type: rule_type.to_string(),
+            aggregation_mode: AGGREGATION_SOURCE.to_string(),
+            pending_aggregation_mode: None,
+            preserve_metadata: false,
             source_path: source.to_string_lossy().to_string(),
             output_path: output.to_string_lossy().to_string(),
             created_at: String::new(),
@@ -2263,6 +2623,30 @@ mod tests {
         touch(&mp4);
         let page = insert_page(db, video.id, 0, Some(&mp4)).await;
         (video, page, mp4)
+    }
+
+    #[tokio::test]
+    async fn aggregation_migration_resumes_after_partial_upgrade() {
+        use sea_orm::{ConnectionTrait, Statement};
+        for columns in 1..=3 {
+            let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+            bili_sync_migration::Migrator::up(&db, Some(15)).await.unwrap();
+            let statements = [
+                "ALTER TABLE organization_rule ADD COLUMN aggregation_mode varchar(16) NOT NULL DEFAULT 'source'",
+                "ALTER TABLE organization_rule ADD COLUMN pending_aggregation_mode varchar(16)",
+                "ALTER TABLE organization_rule ADD COLUMN preserve_metadata boolean NOT NULL DEFAULT false",
+            ];
+            for sql in &statements[..columns] {
+                db.execute(Statement::from_string(db.get_database_backend(), *sql))
+                    .await
+                    .unwrap();
+            }
+            bili_sync_migration::Migrator::up(&db, None).await.unwrap();
+            let manager = bili_sync_migration::SchemaManager::new(&db);
+            for column in ["aggregation_mode", "pending_aggregation_mode", "preserve_metadata"] {
+                assert!(manager.has_column("organization_rule", column).await.unwrap());
+            }
+        }
     }
 
     #[tokio::test]
@@ -2311,6 +2695,13 @@ mod tests {
                 .download_status,
             second.download_status
         );
+    }
+
+    #[test]
+    fn rejects_parent_path_escape() {
+        let root = temp_root("path-escape");
+        assert!(ensure_path_within(&root, &root.join("child/../../outside")).is_err());
+        assert!(ensure_path_within(&root, &root.parent().unwrap().join("outside")).is_err());
     }
 
     #[test]
@@ -3529,9 +3920,16 @@ mod tests {
 
         // 规则编辑锁：无记录时可改路径与类型
         assert!(
-            ensure_rule_editable(&rule.clone(), &db, "new-source", "new-output", "movie")
-                .await
-                .is_ok()
+            ensure_rule_editable(
+                &rule.clone(),
+                &db,
+                "new-source",
+                "new-output",
+                "movie",
+                AGGREGATION_SOURCE
+            )
+            .await
+            .is_ok()
         );
         // 产生记录后：改路径/类型被拒绝，仅改名不受限
         organization_output::ActiveModel {
@@ -3548,9 +3946,16 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            ensure_rule_editable(&rule.clone(), &db, "new-source", "new-output", "movie")
-                .await
-                .is_err(),
+            ensure_rule_editable(
+                &rule.clone(),
+                &db,
+                "new-source",
+                "new-output",
+                "movie",
+                AGGREGATION_SOURCE
+            )
+            .await
+            .is_err(),
             "有记录时修改源/输出/类型应被拒绝"
         );
         assert!(
@@ -3559,7 +3964,8 @@ mod tests {
                 &db,
                 &rule.source_path,
                 &rule.output_path,
-                &rule.rule_type
+                &rule.rule_type,
+                &rule.aggregation_mode
             )
             .await
             .is_ok(),
@@ -5125,5 +5531,553 @@ mod tests {
             "源为目录时应明确报错：{err:#}"
         );
         assert_eq!(std::fs::read(&poster).unwrap(), b"new poster", "目标未被破坏");
+    }
+
+    /// 持久化电视剧规则并执行（测试辅助）
+    async fn persist_tv_rule(
+        db: &DatabaseConnection,
+        name: &str,
+        source: &Path,
+        output: &Path,
+        aggregation_mode: &str,
+    ) -> organization_rule::Model {
+        organization_rule::ActiveModel {
+            name: Set(name.to_string()),
+            rule_type: Set("tv".to_string()),
+            aggregation_mode: Set(aggregation_mode.to_string()),
+            source_path: Set(source.to_string_lossy().to_string()),
+            output_path: Set(output.to_string_lossy().to_string()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+    }
+
+    /// per_video 模式：每个视频一部剧、单P一集；剧名目录冲突不合并（AC1/AC4）
+    #[tokio::test]
+    async fn per_video_mode_creates_series_per_video() {
+        let root = temp_root("agg-per-video");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let (v1, _, mp4_1) = single_video(&db, "BVagg1", "UP1", &source.join("d1"), day_of(1)).await;
+        let (v2, _, _) = single_video(&db, "BVagg2", "UP2", &source.join("d2"), day_of(2)).await;
+        let rule = persist_tv_rule(&db, "逐剧库", &source, &output, AGGREGATION_PER_VIDEO).await;
+        let report = execute_rule(&rule, &db, None).await.unwrap();
+        assert_eq!(report.created, 2, "两个视频各成一集：{report:?}");
+        let rows = organization_output::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.episode == Some(1)));
+        assert_eq!(rows[0].series.as_deref(), Some(v1.name.as_str()));
+        assert_eq!(rows[1].series.as_deref(), Some(v2.name.as_str()));
+        // 源文件保留且硬链接同 inode
+        assert!(mp4_1.is_file());
+        assert_same_inode(Path::new(&rows[0].path), &mp4_1);
+    }
+
+    #[tokio::test]
+    async fn same_title_existing_owner_can_add_episode() {
+        let root = temp_root("agg-collision-owner");
+        let source = root.join("source");
+        let output = root.join("output");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
+        let output = std::fs::canonicalize(output).unwrap();
+        let db = test_db(&root).await;
+        let (owner, _, _) = single_video(&db, "BVowner", "UP", &source.join("owner"), day_of(2)).await;
+        let rule = persist_tv_rule(&db, "碰撞库", &source, &output, AGGREGATION_PER_VIDEO).await;
+        assert_eq!(execute_rule(&rule, &db, None).await.unwrap().created, 1);
+        let (other, _, _) = single_video(&db, "BVother", "UP", &source.join("other"), day_of(1)).await;
+        video::ActiveModel {
+            id: Set(other.id),
+            name: Set(owner.name.clone()),
+            ..Default::default()
+        }
+        .update(&db)
+        .await
+        .unwrap();
+        let next = source.join("owner/next.mp4");
+        touch(&next);
+        insert_page(&db, owner.id, 2, Some(&next)).await;
+        let report = execute_rule(&rule, &db, Some(&[owner.id])).await.unwrap();
+        assert_eq!(report.created, 1, "{report:?}");
+    }
+
+    #[tokio::test]
+    async fn foreign_rule_collision_does_not_block_other_video() {
+        let root = temp_root("agg-collision-foreign");
+        let source = root.join("source");
+        let output = root.join("output");
+        let other_output = root.join("other-output");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&other_output).unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
+        let output = std::fs::canonicalize(output).unwrap();
+        let other_output = std::fs::canonicalize(other_output).unwrap();
+        let db = test_db(&root).await;
+        let (first, _, _) = single_video(&db, "BVforeign", "UP", &source.join("first"), day_of(1)).await;
+        let foreign_rule = persist_tv_rule(&db, "其他库", &source, &other_output, AGGREGATION_PER_VIDEO).await;
+        assert_eq!(execute_rule(&foreign_rule, &db, None).await.unwrap().created, 1);
+        let (second, _, _) = single_video(&db, "BVavailable", "UP", &source.join("second"), day_of(2)).await;
+        video::ActiveModel {
+            id: Set(second.id),
+            name: Set(first.name.clone()),
+            ..Default::default()
+        }
+        .update(&db)
+        .await
+        .unwrap();
+        let rule = persist_tv_rule(&db, "新库", &source, &output, AGGREGATION_PER_VIDEO).await;
+        let report = execute_rule(&rule, &db, Some(&[second.id])).await.unwrap();
+        assert_eq!(report.created, 1, "{report:?}");
+    }
+
+    /// per_video 模式：同标题视频目录冲突，不自动合并、不覆盖（AC4）
+    #[tokio::test]
+    async fn per_video_mode_conflicts_on_same_title() {
+        let root = temp_root("agg-per-video-conflict");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        // insert_video 以 bvid 命名标题，手工改标题使其同名
+        let (mut v1, _, _) = single_video(&db, "BVs1", "UP1", &source.join("d1"), day_of(1)).await;
+        v1.name = "同部剧".into();
+        video::ActiveModel {
+            id: Set(v1.id),
+            name: Set(v1.name.clone()),
+            ..Default::default()
+        }
+        .update(&db)
+        .await
+        .unwrap();
+        let (mut v2, _, _) = single_video(&db, "BVs2", "UP2", &source.join("d2"), day_of(2)).await;
+        v2.name = "同部剧".into();
+        video::ActiveModel {
+            id: Set(v2.id),
+            name: Set(v2.name.clone()),
+            ..Default::default()
+        }
+        .update(&db)
+        .await
+        .unwrap();
+        let rule = persist_tv_rule(&db, "逐剧库", &source, &output, AGGREGATION_PER_VIDEO).await;
+        let report = execute_rule(&rule, &db, None).await.unwrap();
+        assert_eq!(report.created, 1, "第一个视频成剧");
+        assert_eq!(report.skipped, 1, "同标题第二个视频整组冲突");
+        // 冲突语义：第二个视频的目标目录已被第一个视频占用，不合并、不覆盖既有产物
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| matches!(&item.action, ItemAction::Conflict(message) if !message.is_empty()))
+        );
+        // 第二个视频的任何文件都没写进第一个视频的剧集目录
+        let dirs: Vec<String> = organization_output::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| Path::new(&row.path).parent().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(dirs.len(), 1, "两视频各一目录（冲突方无目录）");
+    }
+
+    /// 多P视频在 per_video 模式下为一部剧多集，按分P分集（AC1）
+    #[tokio::test]
+    async fn per_video_mode_multi_page_episodes() {
+        let root = temp_root("agg-per-video-multip");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let video = insert_video(&db, "BVmp", "UP", &source.join("d"), day_of(1), false, 0).await;
+        let mp4_1 = source.join("d/P1.mp4");
+        let mp4_2 = source.join("d/P2.mp4");
+        touch(&mp4_1);
+        touch(&mp4_2);
+        insert_page(&db, video.id, 1, Some(&mp4_1)).await;
+        insert_page(&db, video.id, 2, Some(&mp4_2)).await;
+        let rule = persist_tv_rule(&db, "多P逐剧库", &source, &output, AGGREGATION_PER_VIDEO).await;
+        let report = execute_rule(&rule, &db, None).await.unwrap();
+        assert_eq!(report.created, 2);
+        let rows = organization_output::Entity::find()
+            .order_by_asc(organization_output::Column::Episode)
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].episode, Some(1));
+        assert_eq!(rows[1].episode, Some(2));
+        assert_eq!(rows[0].series.as_deref(), Some(video.name.as_str()));
+    }
+
+    /// 聚合方式切换：确认后删除可证明归属的旧输出与记录、源保留、按新模式重建（AC2）
+    #[tokio::test]
+    async fn switch_aggregation_cleans_provable_outputs_and_rebuilds() {
+        let root = temp_root("agg-switch");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let (v1, _, mp4_1) = single_video(&db, "BVsw1", "UP1", &source.join("d1"), day_of(1)).await;
+        let (_, _, mp4_2) = single_video(&db, "BVsw2", "UP2", &source.join("d2"), day_of(2)).await;
+        let rule = persist_tv_rule(&db, "切换库", &source, &output, AGGREGATION_SOURCE).await;
+        let first = execute_rule(&rule, &db, None).await.unwrap();
+        assert_eq!(first.created, 2);
+        let old_rows: Vec<organization_output::Model> = organization_output::Entity::find().all(&db).await.unwrap();
+        assert_eq!(old_rows.len(), 2);
+        assert!(
+            old_rows
+                .iter()
+                .all(|row| row.series.as_deref() == Some(source.file_name().unwrap().to_str().unwrap()))
+        );
+        let old_series_dir = Path::new(&old_rows[0].path).ancestors().nth(2).unwrap().to_path_buf();
+        // 未知归属文件：用户放在旧剧集目录下的文件（无任何记录/凭证）
+        let user_file = old_series_dir.join("user-file.txt");
+        std::fs::write(&user_file, b"user data").unwrap();
+        // 切换（confirm 由路由层校验，直连内部函数）
+        let report = switch_aggregation_mode(rule.id, &db, AGGREGATION_PER_VIDEO)
+            .await
+            .unwrap();
+        assert_eq!(report.records_removed, 2);
+        assert!(report.files_removed >= 2, "至少删除两个视频硬链接");
+        assert!(report.retained_paths.iter().any(|message| message.contains("NFO")));
+        // 旧剧集目录因存在未知归属文件而保留，但硬链接产物已删
+        assert!(user_file.is_file(), "未知归属文件绝不删除");
+        assert!(!old_rows.iter().any(|row| Path::new(&row.path).exists()));
+        // 源文件保留
+        assert!(mp4_1.is_file() && mp4_2.is_file());
+        // 记录按新模式重建：每视频一剧
+        let new_rows = organization_output::Entity::find().all(&db).await.unwrap();
+        assert_eq!(new_rows.len(), 2);
+        assert!(new_rows.iter().any(|r| r.series.as_deref() == Some(v1.name.as_str())));
+        assert_eq!(report.execute.created, 2);
+        // 规则模式已更新
+        let updated = organization_rule::Entity::find_by_id(rule.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.aggregation_mode, AGGREGATION_PER_VIDEO);
+        assert!(updated.preserve_metadata);
+        let target = PathBuf::from(&new_rows[0].path);
+        let episode_nfo = target.with_extension("nfo");
+        let series_nfo = target.parent().unwrap().parent().unwrap().join("tvshow.nfo");
+        std::fs::write(&episode_nfo, b"user episode metadata").unwrap();
+        std::fs::write(&series_nfo, b"user series metadata").unwrap();
+        let refresh = execute_rule(&updated, &db, None).await.unwrap();
+        assert_eq!(refresh.failed, 0);
+        assert_eq!(std::fs::read(&episode_nfo).unwrap(), b"user episode metadata");
+        assert_eq!(std::fs::read(&series_nfo).unwrap(), b"user series metadata");
+    }
+
+    #[tokio::test]
+    async fn switch_round_trip_reports_old_directory_and_can_retry() {
+        let root = temp_root("agg-switch-roundtrip");
+        let source = root.join("source");
+        let output = root.join("output");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        let source = std::fs::canonicalize(source).unwrap();
+        let output = std::fs::canonicalize(output).unwrap();
+        let db = test_db(&root).await;
+        single_video(&db, "BVround", "UP", &source.join("d"), day_of(1)).await;
+        let rule = persist_tv_rule(&db, "往返", &source, &output, AGGREGATION_SOURCE).await;
+        assert_eq!(execute_rule(&rule, &db, None).await.unwrap().created, 1);
+        assert_eq!(
+            switch_aggregation_mode(rule.id, &db, AGGREGATION_PER_VIDEO)
+                .await
+                .unwrap()
+                .execute
+                .created,
+            1
+        );
+        let old_dir = output.join("source");
+        let report = switch_aggregation_mode(rule.id, &db, AGGREGATION_SOURCE).await.unwrap();
+        assert!(report.execute.items.iter().any(|item| matches!(&item.action, ItemAction::Conflict(message) if message.contains(&old_dir.to_string_lossy().to_string()))));
+        assert!(old_dir.join("tvshow.nfo").is_file());
+        let pending = organization_rule::Entity::find_by_id(rule.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pending.pending_aggregation_mode.is_some());
+        std::fs::rename(&old_dir, root.join("retained-source")).unwrap();
+        let resumed = resume_pending_switch(rule.id, &db).await.unwrap();
+        assert_eq!(resumed.execute.created, 1);
+        assert!(root.join("retained-source/tvshow.nfo").is_file());
+    }
+
+    /// 切换清理：非同源 mp4 保留记录，处理后可重试。
+    #[tokio::test]
+    async fn switch_cleanup_keeps_foreign_mp4_and_reports() {
+        let root = temp_root("agg-switch-foreign");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let (_, _, mp4_1) = single_video(&db, "BVfg1", "UP1", &source.join("d1"), day_of(1)).await;
+        let rule = persist_tv_rule(&db, "外源库", &source, &output, AGGREGATION_SOURCE).await;
+        execute_rule(&rule, &db, None).await.unwrap();
+        let row = organization_output::Entity::find().one(&db).await.unwrap().unwrap();
+        let target = PathBuf::from(&row.path);
+        // 用户把输出 mp4 替换为无关文件（非同源）
+        std::fs::remove_file(&target).unwrap();
+        std::fs::write(&target, b"foreign content").unwrap();
+        assert!(
+            switch_aggregation_mode(rule.id, &db, AGGREGATION_PER_VIDEO)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"foreign content");
+        assert!(mp4_1.is_file());
+        assert!(
+            organization_output::Entity::find_by_id(row.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let pending = organization_rule::Entity::find_by_id(rule.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.pending_aggregation_mode.as_deref(), Some(AGGREGATION_PER_VIDEO));
+        std::fs::remove_file(&target).unwrap();
+        let report = resume_pending_switch(rule.id, &db).await.unwrap();
+        assert_eq!(report.execute.created, 1);
+    }
+
+    /// 重复切换同一模式被拒绝；残留重整意图记录在切换清理中被一并收敛（AC3 前置）
+    #[tokio::test]
+    async fn switch_rejects_same_mode_and_cleans_leftover_intents() {
+        let root = temp_root("agg-switch-reject");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let rule = persist_tv_rule(&db, "拒绝库", &source, &output, AGGREGATION_SOURCE).await;
+        assert!(switch_aggregation_mode(rule.id, &db, AGGREGATION_SOURCE).await.is_err());
+        // 残留意图记录（无同源 mp4 凭证，路径保留但记录被清理）
+        organization_output::ActiveModel {
+            rule_id: Set(rule.id),
+            page_id: Set(1),
+            bvid: Set(format!("{REORG_INTENT_PREFIX}BVleft")),
+            cid: Set(1),
+            series: Set(Some("新剧".into())),
+            episode: Set(Some(1)),
+            path: Set(output.join("missing.mp4").to_string_lossy().to_string()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let report = switch_aggregation_mode(rule.id, &db, AGGREGATION_PER_VIDEO)
+            .await
+            .unwrap();
+        let remaining: Vec<i32> = organization_output::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| is_reorg_intent_bvid(&row.bvid))
+            .map(|row| row.id)
+            .collect();
+        assert!(remaining.is_empty(), "切换清理应收敛残留意图记录");
+        assert_eq!(report.records_removed, 1);
+    }
+
+    /// 清理不推定 sidecar 归属：与旧输出同名的用户文件（nfo/字幕/封面/目录级 extras）绝不删除（AC3）
+    #[tokio::test]
+    async fn switch_cleanup_never_deletes_unowned_sidecars_and_extras() {
+        let root = temp_root("agg-switch-sidecar");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let (_, _, _) = single_video(&db, "BVsc1", "UP1", &source.join("d1"), day_of(1)).await;
+        let rule = persist_tv_rule(&db, "旁挂库", &source, &output, AGGREGATION_SOURCE).await;
+        execute_rule(&rule, &db, None).await.unwrap();
+        let row = organization_output::Entity::find().one(&db).await.unwrap().unwrap();
+        let target = PathBuf::from(&row.path);
+        let season_dir = target.parent().unwrap().to_path_buf();
+        let series_dir = season_dir.parent().unwrap().to_path_buf();
+        let stem = target.file_stem().unwrap().to_string_lossy().to_string();
+        // 用户在同目录放了与产物同名的 sidecar（旧记录不保存逐文件归属，无法证明归属）
+        let sidecars = [
+            season_dir.join(format!("{stem}.srt")),
+            season_dir.join(format!("{stem}-thumb.jpg")),
+            series_dir.join("tvshow.nfo"),
+            series_dir.join("poster.jpg"),
+        ];
+        for sidecar in &sidecars {
+            std::fs::write(sidecar, b"user data").unwrap();
+        }
+        let report = switch_aggregation_mode(rule.id, &db, AGGREGATION_PER_VIDEO)
+            .await
+            .unwrap();
+        for sidecar in &sidecars {
+            assert!(sidecar.is_file(), "同名 sidecar/extras 绝不删除：{}", sidecar.display());
+            assert_eq!(std::fs::read(sidecar).unwrap(), b"user data");
+        }
+        // 同源 mp4 仍被删除并报告
+        assert!(!target.exists());
+        assert!(report.files_removed > 0);
+    }
+
+    /// 切换状态机：pending 期间整理执行被拒绝；重建失败后可 resume 续作（AC3 中断恢复）
+    #[tokio::test]
+    async fn switch_pending_blocks_execute_and_resume_completes() {
+        let root = temp_root("agg-switch-pending");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let (_, _, mp4_1) = single_video(&db, "BVpd1", "UP1", &source.join("d1"), day_of(1)).await;
+        let rule = persist_tv_rule(&db, "中断库", &source, &output, AGGREGATION_SOURCE).await;
+        execute_rule(&rule, &db, None).await.unwrap();
+        // 模拟中断：清理记录后、更新模式前崩溃——残留 pending 但模式仍为 source、无记录
+        organization_rule::ActiveModel {
+            id: Set(rule.id),
+            pending_aggregation_mode: Set(Some(AGGREGATION_PER_VIDEO.to_string())),
+            ..Default::default()
+        }
+        .update(&db)
+        .await
+        .unwrap();
+        organization_output::Entity::delete_many()
+            .filter(organization_output::Column::RuleId.eq(rule.id))
+            .exec(&db)
+            .await
+            .unwrap();
+        // pending 期间任何整理执行（含自动整理）被拒绝
+        let result = execute_rule(&rule, &db, None).await;
+        assert!(result.is_err(), "pending 期间整理执行应被拒绝");
+        assert!(format!("{:#}", result.unwrap_err()).contains("尚未完成"));
+        // 按目标模式 resume：完成模式提交与重建
+        let report = resume_pending_switch(rule.id, &db).await.unwrap();
+        assert_eq!(report.execute.created, 1);
+        let updated = organization_rule::Entity::find_by_id(rule.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.aggregation_mode, AGGREGATION_PER_VIDEO);
+        assert_eq!(updated.pending_aggregation_mode, None, "重建成功后 pending 清除");
+        let rows = organization_output::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(mp4_1.is_file(), "源文件保留");
+    }
+
+    #[tokio::test]
+    async fn switch_resume_keeps_rebuilt_records_after_interruption() {
+        let root = temp_root("agg-switch-resume-rebuild");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let (_, _, source_mp4) = single_video(&db, "BVresume", "UP", &source.join("d1"), day_of(1)).await;
+        let rule = persist_tv_rule(&db, "续作库", &source, &output, AGGREGATION_PER_VIDEO).await;
+        execute_rule(&rule, &db, None).await.unwrap();
+        let row = organization_output::Entity::find().one(&db).await.unwrap().unwrap();
+        organization_rule::ActiveModel {
+            id: Set(rule.id),
+            pending_aggregation_mode: Set(Some(AGGREGATION_PER_VIDEO.to_string())),
+            ..Default::default()
+        }
+        .update(&db)
+        .await
+        .unwrap();
+        let report = resume_pending_switch(rule.id, &db).await.unwrap();
+        let after = organization_output::Entity::find().one(&db).await.unwrap().unwrap();
+        assert_eq!(after.id, row.id, "重建记录不得在续作时清除");
+        assert_same_inode(Path::new(&after.path), &source_mp4);
+        assert_eq!(report.records_removed, 0);
+        assert_eq!(report.execute.failed, 0);
+        organization_rule::ActiveModel {
+            id: Set(rule.id),
+            pending_aggregation_mode: Set(Some(AGGREGATION_PER_VIDEO.to_string())),
+            ..Default::default()
+        }
+        .update(&db)
+        .await
+        .unwrap();
+        std::fs::remove_file(&after.path).unwrap();
+        std::fs::write(&after.path, b"foreign").unwrap();
+        let report = resume_pending_switch(rule.id, &db).await.unwrap();
+        assert!(report.execute.failed > 0);
+        assert_eq!(std::fs::read(&after.path).unwrap(), b"foreign");
+        let pending = organization_rule::Entity::find_by_id(rule.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pending.pending_aggregation_mode.is_some());
+    }
+
+    #[tokio::test]
+    async fn switch_conflict_remains_pending_for_retry() {
+        let root = temp_root("agg-switch-conflict-retry");
+        std::fs::create_dir_all(root.join("source")).unwrap();
+        std::fs::create_dir_all(root.join("output")).unwrap();
+        let source = std::fs::canonicalize(root.join("source")).unwrap();
+        let output = std::fs::canonicalize(root.join("output")).unwrap();
+        let db = test_db(&root).await;
+        let (video, _, _) = single_video(&db, "BVblocked", "UP", &source.join("d1"), day_of(1)).await;
+        let rule = persist_tv_rule(&db, "冲突库", &source, &output, AGGREGATION_SOURCE).await;
+        let occupied = output.join(filenamify(&video.name));
+        std::fs::create_dir(&occupied).unwrap();
+        let report = switch_aggregation_mode(rule.id, &db, AGGREGATION_PER_VIDEO)
+            .await
+            .unwrap();
+        assert!(
+            report
+                .execute
+                .items
+                .iter()
+                .any(|item| matches!(item.action, ItemAction::Conflict(_)))
+        );
+        let pending = organization_rule::Entity::find_by_id(rule.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.pending_aggregation_mode.as_deref(), Some(AGGREGATION_PER_VIDEO));
+        assert!(
+            ensure_rule_editable(
+                &pending,
+                &db,
+                &pending.source_path,
+                &pending.output_path,
+                "tv",
+                AGGREGATION_PER_VIDEO
+            )
+            .await
+            .is_err()
+        );
+        std::fs::remove_dir(&occupied).unwrap();
+        let resumed = resume_pending_switch(rule.id, &db).await.unwrap();
+        assert_eq!(resumed.execute.created, 1);
+        let complete = organization_rule::Entity::find_by_id(rule.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(complete.pending_aggregation_mode.is_none());
     }
 }

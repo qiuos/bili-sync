@@ -432,11 +432,14 @@ export interface UpdateVideoSourceResponse {
 
 // 媒体整理相关类型
 export type OrganizationRuleType = 'tv' | 'movie';
+export type OrganizationAggregationMode = 'source' | 'per_video';
 
 export interface OrganizationRule {
 	id: number;
 	name: string;
 	rule_type: OrganizationRuleType;
+	aggregation_mode: OrganizationAggregationMode;
+	pending_aggregation_mode: OrganizationAggregationMode | null;
 	source_path: string;
 	output_path: string;
 }
@@ -448,6 +451,7 @@ export interface OrganizationRulesResponse {
 export interface OrganizationRuleRequest {
 	name: string;
 	rule_type: OrganizationRuleType;
+	aggregation_mode: OrganizationAggregationMode;
 	source_path: string;
 	output_path: string;
 }
@@ -470,6 +474,13 @@ export interface OrganizationPlanItem {
 export interface OrganizationPlanResponse {
 	items: OrganizationPlanItem[];
 	warnings: string[];
+}
+
+export interface OrganizationSwitchResponse {
+	records_removed: number;
+	files_removed: number;
+	retained_paths: string[];
+	execute: OrganizationExecuteResponse;
 }
 
 export interface OrganizationExecuteResponse {

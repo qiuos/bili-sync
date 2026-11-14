@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "bili_sync"
-version = "2.13.5"
+version = "2.14.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "bili_sync_entity"
-version = "2.13.5"
+version = "2.14.0"
 dependencies = [
  "derivative",
  "either",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "bili_sync_migration"
-version = "2.13.5"
+version = "2.14.0"
 dependencies = [
  "sea-orm-migration",
 ]
@@ -3221,6 +3221,8 @@ dependencies = [
  "dotenvy",
  "glob",
  "regex",
+ "sea-schema",
+ "sqlx",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -3311,7 +3313,9 @@ checksum = "2239ff574c04858ca77485f112afea1a15e53135d3097d0c86509cef1def1338"
 dependencies = [
  "futures",
  "sea-query",
+ "sea-query-binder",
  "sea-schema-derive",
+ "sqlx",
 ]
 
 [[package]]
